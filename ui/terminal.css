@@ -1,0 +1,164 @@
+/* A dead CRT with a phosphor tube behind it. Nothing here is load-bearing;
+   it just has to look like 1983. */
+
+:root {
+  --phosphor: #33ff66;
+  --phosphor-dim: #1f9c3f;
+  --phosphor-hot: #b6ffcb;
+  --amber: #ffb642;
+  --alarm: #ff5f52;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: #000;
+  overflow: hidden;
+}
+
+#crt {
+  position: relative;
+  height: 100%;
+  background: radial-gradient(ellipse at center, #05170a 0%, #000 75%);
+}
+
+#screen {
+  position: absolute;
+  inset: 0;
+  padding: 18px 22px;
+  overflow-y: auto;
+  overflow-x: hidden;
+
+  font-family: "Consolas", "DejaVu Sans Mono", "Courier New", monospace;
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--phosphor);
+  text-shadow: 0 0 4px rgba(51, 255, 102, 0.55), 0 0 11px rgba(51, 255, 102, 0.25);
+
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+#screen::-webkit-scrollbar {
+  width: 8px;
+}
+
+#screen::-webkit-scrollbar-thumb {
+  background: rgba(51, 255, 102, 0.25);
+}
+
+.line {
+  min-height: 1.45em;
+}
+
+.sys {
+  color: var(--phosphor-dim);
+}
+
+.hot {
+  color: var(--phosphor-hot);
+}
+
+.me {
+  color: var(--phosphor);
+}
+
+.them {
+  color: var(--amber);
+  text-shadow: 0 0 4px rgba(255, 182, 66, 0.5);
+}
+
+.err {
+  color: var(--alarm);
+  text-shadow: 0 0 5px rgba(255, 95, 82, 0.55);
+}
+
+.banner {
+  color: var(--phosphor-hot);
+  text-shadow: 0 0 7px rgba(182, 255, 203, 0.6);
+}
+
+/* --- prompt --- */
+
+#promptline {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+#typed {
+  white-space: pre-wrap;
+}
+
+#cursor {
+  animation: blink 1.05s steps(1, end) infinite;
+  margin-left: -2px;
+}
+
+@keyframes blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* The real input has to stay focusable, so it's parked off-screen rather than
+   display:none, which would stop it receiving keystrokes. */
+#capture {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+/* --- tube artefacts --- */
+
+#scanlines,
+#flicker,
+#vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+#scanlines {
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0px,
+    rgba(0, 0, 0, 0) 2px,
+    rgba(0, 0, 0, 0.28) 3px,
+    rgba(0, 0, 0, 0.28) 4px
+  );
+}
+
+#flicker {
+  background: rgba(51, 255, 102, 0.035);
+  animation: flicker 4.2s infinite steps(1, end);
+}
+
+@keyframes flicker {
+  0%, 3%, 7%, 42%, 45%, 78%, 100% { opacity: 0.28; }
+  4%, 43%, 79% { opacity: 0.85; }
+  8%, 46%, 80% { opacity: 0.12; }
+}
+
+#vignette {
+  background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0) 55%, rgba(0, 0, 0, 0.75) 100%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #cursor,
+  #flicker {
+    animation: none;
+  }
+}

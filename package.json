@@ -1,0 +1,39 @@
+{
+  "name": "meshchat",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Serverless peer-to-peer chat. Your device talks to their device. Nothing in between.",
+  "keywords": [
+    "p2p",
+    "peer-to-peer",
+    "decentralized",
+    "serverless",
+    "chat",
+    "ipv6",
+    "nat-traversal",
+    "electron",
+    "end-to-end-encryption"
+  ],
+  "homepage": "https://github.com/VijayarajParamasivam/MeshChat#readme",
+  "bugs": {
+    "url": "https://github.com/VijayarajParamasivam/MeshChat/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VijayarajParamasivam/MeshChat.git"
+  },
+  "license": "MIT",
+  "author": "Vijayaraj Paramasivam",
+  "main": "electron/main.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "electron .",
+    "start:b": "node scripts/second-instance.js",
+    "test": "node test/crypto-and-transport.js && node test/ipv6.js"
+  },
+  "devDependencies": {
+    "electron": "^43.2.0"
+  }
+}

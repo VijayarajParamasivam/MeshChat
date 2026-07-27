@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;"
+    />
+    <title>MeshChat</title>
+    <link rel="stylesheet" href="terminal.css" />
+  </head>
+  <body>
+    <div id="crt">
+      <div id="screen">
+        <div id="log" aria-live="polite"></div>
+        <div id="promptline">
+          <span id="sym">&gt;</span><span id="typed"></span><span id="cursor">&#9608;</span>
+        </div>
+      </div>
+      <div id="scanlines" aria-hidden="true"></div>
+      <div id="flicker" aria-hidden="true"></div>
+      <div id="vignette" aria-hidden="true"></div>
+    </div>
+
+    <!-- Real input, kept invisible: it does the typing and IME work while the
+         green block above renders the authentic terminal caret. -->
+    <input id="capture" autocomplete="off" autocorrect="off" spellcheck="false" />
+
+    <script src="terminal.js"></script>
+  </body>
+</html>

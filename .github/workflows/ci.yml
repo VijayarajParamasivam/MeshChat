@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['20', '22', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No install step: the engine and its tests use only Node built-ins.
+      # Electron is a devDependency of the desktop shell, not of the tests.
+      - name: Check every file parses
+        run: |
+          for file in electron/*.js scripts/*.js src/core/*.js test/*.js ui/terminal.js; do
+            node --check "$file"
+          done
+
+      - name: Run tests
+        run: npm test

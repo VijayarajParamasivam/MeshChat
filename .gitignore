@@ -1,0 +1,19 @@
+node_modules/
+dist/
+build/
+out/
+
+# Runtime data. Identities live in the OS app-data directory, but never let a
+# stray copy near the repo — identity.json holds private keys.
+identity.json
+friends.json
+messages/
+*.log
+gun-data*
+
+.DS_Store
+Thumbs.db
+.env
+.env.*
+.vscode/
+.idea/
