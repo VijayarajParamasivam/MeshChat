@@ -41,6 +41,38 @@ function describeFamily(address) {
   return address.includes(':') ? 'ipv6' : 'ipv4';
 }
 
+function formatEndpoint(endpoint) {
+  const host = String(endpoint.host);
+  return host.includes(':')
+    ? `[${host}]:${endpoint.port}`
+    : `${host}:${endpoint.port}`;
+}
+
+/**
+ * Turn a failed dial into something a human can act on. The distinction that
+ * matters most: a refusal proves the packets got there, while a timeout means
+ * they were silently dropped — which points at a firewall rather than a wrong
+ * address.
+ */
+function explainDialFailure(endpoint, error) {
+  const where = `${endpoint.type} ${formatEndpoint(endpoint)}`;
+
+  switch (error.code) {
+    case 'ETIMEDOUT':
+      return `${where} — no reply. packets are being dropped: their firewall, router or ISP.`;
+    case 'ECONNREFUSED':
+      return `${where} — reachable, but nothing is listening. is meshchat running there?`;
+    case 'ENETUNREACH':
+      return `${where} — no route from here. this machine has no path to that address.`;
+    case 'EHOSTUNREACH':
+      return `${where} — host unreachable.`;
+    case 'EHANDSHAKE':
+      return `${where} — connected, but the handshake failed: ${error.message}`;
+    default:
+      return `${where} — ${error.message}`;
+  }
+}
+
 class Mesh extends EventEmitter {
   constructor() {
     super();
@@ -50,6 +82,7 @@ class Mesh extends EventEmitter {
     this.attempts = new Map();
     this.nextTry = new Map();
     this.nearby = new Map();
+    this.lastFailure = new Map();
 
     this.server = null;
     this.beacon = null;
@@ -363,20 +396,66 @@ class Mesh extends EventEmitter {
     this._flushOutbox(peer.id);
   }
 
-  async _connect(friend) {
-    if (this.links.has(friend.id) || this.dialing.has(friend.id)) return;
+  async _connect(friend, { verbose = false } = {}) {
+    if (this.links.has(friend.id) || this.dialing.has(friend.id)) return null;
 
     const endpoints = this._orderEndpoints(friend.endpoints);
-    if (!endpoints.length) return;
+    if (!endpoints.length) {
+      if (verbose) this.log(`${friend.name} has no address we can dial`);
+      return { ok: false, reasons: ['their card contains no reachable address'] };
+    }
 
+    const failures = [];
     this.dialing.add(friend.id);
     try {
-      const link = await this._race(endpoints, friend.id);
-      if (link) this._adopt(link);
-      else this._backOff(friend.id);
+      const link = await this._race(endpoints, friend.id, (endpoint, error) =>
+        failures.push(explainDialFailure(endpoint, error))
+      );
+
+      if (link) {
+        this._adopt(link);
+        return { ok: true, reasons: [] };
+      }
+
+      this._backOff(friend.id);
+      this._reportFailure(friend, failures, verbose);
+      return { ok: false, reasons: failures };
     } finally {
       this.dialing.delete(friend.id);
     }
+  }
+
+  /**
+   * Say why a friend is unreachable, but only when the reason changes —
+   * otherwise a permanently offline friend would spam the log every 15 seconds.
+   */
+  _reportFailure(friend, failures, verbose) {
+    const signature = failures.join('|');
+    if (!verbose && this.lastFailure.get(friend.id) === signature) return;
+    this.lastFailure.set(friend.id, signature);
+
+    this.log(`could not reach ${friend.name}:`);
+    for (const reason of failures) this.log(`  ${reason}`);
+  }
+
+  /** Force an immediate attempt and report everything, for /try. */
+  async probe(friendId) {
+    const friend = this.friends.get(friendId);
+    if (!friend) throw new Error('not a friend');
+    if (this.links.has(friendId)) {
+      return { ok: true, alreadyOnline: true, endpoints: friend.endpoints || [], reasons: [] };
+    }
+
+    this.attempts.delete(friendId);
+    this.nextTry.delete(friendId);
+    this.lastFailure.delete(friendId);
+
+    const result = (await this._connect(friend, { verbose: true })) || {
+      ok: false,
+      reasons: ['a connection attempt is already in progress'],
+    };
+
+    return { ...result, endpoints: this._orderEndpoints(friend.endpoints) };
   }
 
   /**
@@ -388,7 +467,7 @@ class Mesh extends EventEmitter {
    * firing all at once means the preferred address usually wins outright, so we
    * rarely open a connection only to throw it away.
    */
-  _race(endpoints, expectId) {
+  _race(endpoints, expectId, onFailure = () => {}) {
     return new Promise((resolve) => {
       let settled = false;
       let pending = endpoints.length;
@@ -415,7 +494,7 @@ class Mesh extends EventEmitter {
             transport
               .dial(endpoint.host, endpoint.port, this._context(), expectId, DIAL_TIMEOUT_MS)
               .then((link) => finish(link))
-              .catch(() => {})
+              .catch((error) => onFailure(endpoint, error))
               .finally(oneDone);
           }, index * DIAL_STAGGER_MS)
         );

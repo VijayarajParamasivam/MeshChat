@@ -35,17 +35,35 @@ function makePeer(name) {
 }
 
 (async () => {
+  // Address classification runs everywhere, with or without real IPv6. It is
+  // what stops the app advertising an address nobody outside can reach — and
+  // what explains to a confused user why the fe80:: in their ipconfig is not
+  // the IPv6 they think it is.
+  check('global unicast recognised', portal.isGlobalIPv6('2409:40f4::1'));
+  check('3xxx range recognised', portal.isGlobalIPv6('3ffe::1'));
+  check('link-local rejected', !portal.isGlobalIPv6('fe80::3dea:4c3:e915:9cef'));
+  check('unique-local rejected', !portal.isGlobalIPv6('fd00::1'));
+  check('loopback rejected', !portal.isGlobalIPv6('::1'));
+  check('v4-mapped rejected', !portal.isGlobalIPv6('::ffff:192.168.1.1'));
+
+  const kinds = portal.classifyIPv6();
+  check('classifier returns all three buckets',
+    Array.isArray(kinds.global) && Array.isArray(kinds.linkLocal) && Array.isArray(kinds.uniqueLocal));
+  check('no link-local leaks into the global bucket',
+    !kinds.global.some((a) => a.toLowerCase().startsWith('fe80')));
+  check('no unique-local leaks into the global bucket',
+    !kinds.global.some((a) => /^f[cd]/i.test(a)));
+
   const addresses = portal.globalIPv6Addresses();
 
   if (!addresses.length) {
-    console.log('SKIP  no global IPv6 address on this machine — nothing to test');
-    process.exit(0);
+    console.log('\nSKIP  no global IPv6 here — skipping the live connection test');
+    console.log(failures ? `\n${failures} FAILURE(S)` : '\nclassification checks passed');
+    process.exit(failures ? 1 : 0);
   }
 
   const target = addresses[0];
   check('machine has a global IPv6 address', true, target);
-  check('address is global unicast (2000::/3)', portal.isGlobalIPv6(target));
-  check('link-local addresses are excluded', !addresses.some((a) => a.startsWith('fe80')));
 
   const a = makePeer('alice');
   const b = makePeer('bob');

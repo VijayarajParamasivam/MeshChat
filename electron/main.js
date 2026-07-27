@@ -16,6 +16,7 @@ const { app, BrowserWindow, ipcMain, clipboard } = require('electron');
 
 const firewall = require('../src/core/firewall');
 const identity = require('../src/core/identity');
+const ipv6doctor = require('../src/core/ipv6doctor');
 const store = require('../src/core/store');
 const { Mesh } = require('../src/core/roster');
 
@@ -204,6 +205,17 @@ const handlers = {
 
   async openFirewall() {
     return firewall.install(requireEngine().port);
+  },
+
+  async probe(query) {
+    const engine = requireEngine();
+    const friend = engine.resolve(query);
+    if (!friend) throw new Error(`no single match for "${query}"`);
+    return { name: friend.name, ...(await engine.probe(friend.id)) };
+  },
+
+  async ipv6() {
+    return ipv6doctor.diagnose();
   },
 
   exportIdentity() {

@@ -95,18 +95,47 @@ function isGlobalIPv6(address) {
   return (head & 0xe000) === 0x2000;
 }
 
-/** Every globally routable IPv6 address on this machine. */
-function globalIPv6Addresses() {
-  const found = [];
+/** Node has reported `family` as both 'IPv6' and 6 across versions. */
+function isIPv6Entry(addr) {
+  return addr.family === 'IPv6' || addr.family === 6;
+}
+
+/**
+ * Sort every IPv6 address on this machine into what it's actually good for.
+ *
+ * This matters because `ipconfig` always shows a link-local `fe80::` address on
+ * every machine ever made, whether or not the network carries IPv6 at all. It
+ * looks exactly like having IPv6, so "my ipconfig shows IPv6 but the app says
+ * none" is the expected confusion rather than a bug — only the `global` list can
+ * be reached from the internet.
+ */
+function classifyIPv6() {
+  const global = [];
+  const linkLocal = [];
+  const uniqueLocal = [];
+
   for (const addresses of Object.values(os.networkInterfaces())) {
     for (const addr of addresses || []) {
-      if (addr.family !== 'IPv6' || addr.internal) continue;
-      // Strip any zone index; global addresses don't need one.
+      if (!isIPv6Entry(addr) || addr.internal) continue;
+
       const host = addr.address.split('%')[0];
-      if (isGlobalIPv6(host) && !found.includes(host)) found.push(host);
+      const head = parseInt(host.split(':')[0] || '0', 16);
+
+      let bucket = null;
+      if (isGlobalIPv6(host)) bucket = global;
+      else if ((head & 0xffc0) === 0xfe80) bucket = linkLocal;
+      else if ((head & 0xfe00) === 0xfc00) bucket = uniqueLocal;
+
+      if (bucket && !bucket.includes(host)) bucket.push(host);
     }
   }
-  return found;
+
+  return { global, linkLocal, uniqueLocal };
+}
+
+/** Every globally routable IPv6 address on this machine. */
+function globalIPv6Addresses() {
+  return classifyIPv6().global;
 }
 
 /**
@@ -448,9 +477,12 @@ async function open(port, { onLog = () => {} } = {}) {
 
   // IPv6 first, because when it's available it makes the rest irrelevant:
   // a global IPv6 address is dialable as-is, with no router negotiation at all.
-  const ip6 = orderIPv6Stable(globalIPv6Addresses());
+  const kinds = classifyIPv6();
+  const ip6 = orderIPv6Stable(kinds.global);
   if (ip6.length) {
     onLog(`portal: public IPv6 found (${ip6[0]}) — no NAT to get around`);
+  } else if (kinds.linkLocal.length || kinds.uniqueLocal.length) {
+    onLog('portal: IPv6 exists here but none of it is internet-routable');
   }
 
   onLog('portal: asking your router for an IPv4 way in...');
@@ -506,6 +538,8 @@ async function open(port, { onLog = () => {} } = {}) {
   active = {
     ...ipv4,
     ip6,
+    ip6LinkLocal: kinds.linkLocal,
+    ip6UniqueLocal: kinds.uniqueLocal,
     ip6Reachable: ip6.length > 0,
     ipv4Reachable,
     lanIp,
@@ -559,4 +593,5 @@ module.exports = {
   isPrivate,
   isGlobalIPv6,
   globalIPv6Addresses,
+  classifyIPv6,
 };

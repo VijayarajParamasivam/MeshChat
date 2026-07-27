@@ -246,7 +246,9 @@ function dial(host, port, ctx, expectId, timeoutMs = 8000) {
     const socket = net.createConnection({ host, port });
     let settled = false;
 
-    const fail = (reason) => {
+    // Carry the OS error code through. Which one it is says a great deal:
+    // a refusal means the packets arrived, a timeout means they vanished.
+    const fail = (reason, code) => {
       if (settled) return;
       settled = true;
       try {
@@ -254,12 +256,17 @@ function dial(host, port, ctx, expectId, timeoutMs = 8000) {
       } catch {
         /* already gone */
       }
-      reject(new Error(reason));
+      const error = new Error(reason);
+      error.code = code || 'EFAIL';
+      reject(error);
     };
 
-    const timer = setTimeout(() => fail('connection timed out'), timeoutMs);
+    const timer = setTimeout(
+      () => fail(`no reply within ${timeoutMs}ms`, 'ETIMEDOUT'),
+      timeoutMs
+    );
 
-    socket.once('error', (err) => fail(err.message));
+    socket.once('error', (err) => fail(err.message, err.code));
 
     socket.once('connect', () => {
       const link = new Link(socket, ctx, { expectId });
@@ -273,7 +280,7 @@ function dial(host, port, ctx, expectId, timeoutMs = 8000) {
 
       link.once('failed', (reason) => {
         clearTimeout(timer);
-        fail(reason);
+        fail(reason, 'EHANDSHAKE');
       });
     });
   });

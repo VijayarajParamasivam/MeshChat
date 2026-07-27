@@ -158,6 +158,8 @@ const HELP = [
   '  /leave             close the conversation',
   '',
   '  /net               connection diagnostics',
+  '  /try <who>         force a connection attempt and show why it fails',
+  '  /ipv6              why this machine has no IPv6, and how to fix it',
   '  /firewall          allow inbound connections (asks for admin)',
   '  /export            write an identity backup file',
   '  /import <path>     restore an identity backup',
@@ -317,7 +319,18 @@ async function runCommand(raw) {
         for (const extra of net.ip6.slice(1)) line(`             ${addr(extra, net.port)}`, 'sys');
         line('             public and routable — nothing is translating it', 'sys');
       } else {
-        sys('ipv6         none on this network');
+        sys('ipv6         none that the internet can reach');
+        // ipconfig shows these on every machine alive, so spell out why they
+        // don't count rather than leaving a bare "none" to argue with.
+        for (const host of net.ip6LinkLocal || []) {
+          line(`             ${host}  link-local — never leaves your cable`, 'sys');
+        }
+        for (const host of net.ip6UniqueLocal || []) {
+          line(`             ${host}  private range — like 192.168, not routable`, 'sys');
+        }
+        if ((net.ip6LinkLocal || []).length || (net.ip6UniqueLocal || []).length) {
+          line('             a real one starts with 2 or 3. run /ipv6 for why.', 'sys');
+        }
       }
 
       sys(`ipv4         ${net.lanIp}:${net.lanPort}  (${net.method})`);
@@ -344,6 +357,51 @@ async function runCommand(raw) {
         line('  no public address here, so only same-WiFi chat works.', 'err');
         line(`  ${net.ipv4Note || ''}`, 'sys');
       }
+      line('');
+      return;
+    }
+
+    case 'try': {
+      if (!arg) return err('usage: /try <who>');
+      sys(`dialling ${arg}...`);
+      const result = await call('probe', arg);
+
+      if (result.alreadyOnline) return sys(`${result.name} is already connected`);
+
+      line('');
+      sys(`addresses on record for ${result.name}:`);
+      if (!result.endpoints.length) line('  (none — their card had no reachable address)', 'err');
+      for (const e of result.endpoints) {
+        const host = String(e.host).includes(':') ? `[${e.host}]:${e.port}` : `${e.host}:${e.port}`;
+        line(`  ${e.type.padEnd(4)} ${host}`, 'sys');
+      }
+
+      line('');
+      if (result.ok) {
+        line(`  connected to ${result.name}.`, 'hot');
+      } else {
+        line('  every address failed:', 'err');
+        for (const reason of result.reasons) line(`  ${reason}`, 'err');
+        line('', 'sys');
+        line('  if they have no ipv6 and you do, there is no shared path at all.', 'sys');
+        line('  have them run /ipv6 on their machine.', 'sys');
+      }
+      line('');
+      return;
+    }
+
+    case 'ipv6': {
+      const report = await call('ipv6');
+      line('');
+      if (report.global.length) {
+        for (const address of report.global) sys(`ipv6  ${address}`);
+      } else {
+        sys('ipv6  none');
+      }
+      line('');
+      line(`  ${report.verdict}`, report.global.length ? 'hot' : 'err');
+      if (report.advice.length) line('');
+      for (const row of report.advice) line(`  ${row}`, 'sys');
       line('');
       return;
     }
