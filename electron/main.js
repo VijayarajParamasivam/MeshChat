@@ -225,6 +225,16 @@ const handlers = {
     };
   },
 
+  async tor() {
+    return requireEngine().torStatus();
+  },
+
+  async setTor(patch) {
+    const engine = requireEngine();
+    engine.setTor(patch || {});
+    return engine.torStatus();
+  },
+
   async ipv6() {
     return ipv6doctor.diagnose();
   },

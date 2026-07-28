@@ -161,6 +161,8 @@ const HELP = [
   '  /try <who>         force a connection attempt and show why it fails',
   '  /punch <who>       hole-punch to a friend nobody can dial (both must be online)',
   '  /ipv6              why this machine has no IPv6, and how to fix it',
+  '  /tor               route over Tor — works anywhere, hides both IPs',
+  '  /private           Tor only: publish no IP at all, ever',
   '  /firewall          allow inbound connections (asks for admin)',
   '  /export            write an identity backup file',
   '  /import <path>     restore an identity backup',
@@ -438,6 +440,74 @@ async function runCommand(raw) {
         line('  needs a connection that accepts inbound — wired broadband with an', 'sys');
         line('  ipv6 pinhole open on this port.', 'sys');
       }
+      line('');
+      return;
+    }
+
+    case 'tor':
+    case 'private': {
+      const wantPrivate = command.toLowerCase() === 'private';
+      const state = await call('tor');
+      const on = wantPrivate ? state.private : state.enabled;
+
+      // Bare command reports; an explicit on/off changes it.
+      const wanted = /^(on|off|yes|no|1|0)$/i.test(arg)
+        ? /^(on|yes|1)$/i.test(arg)
+        : null;
+
+      if (wanted === null) {
+        line('');
+        sys(`tor binary   ${state.binary || 'not found'}`);
+        sys(`tor          ${state.running ? 'running' : state.enabled ? 'enabled, not running' : 'off'}`);
+        if (state.onion) sys(`onion        ${state.onion}:${state.port}`);
+        sys(`private      ${state.private ? 'on — no ip is published' : 'off'}`);
+
+        if (!state.binary) {
+          line('');
+          for (const row of state.hint || []) line(`  ${row}`, 'sys');
+        }
+
+        line('');
+        line(`  /${wantPrivate ? 'private' : 'tor'} on   to turn it ${on ? 'back ' : ''}on`, 'sys');
+        line(`  /${wantPrivate ? 'private' : 'tor'} off  to turn it off`, 'sys');
+        line('');
+        return;
+      }
+
+      if (wanted && !state.binary) {
+        line('');
+        for (const row of state.hint || []) err(`  ${row}`);
+        line('');
+        return;
+      }
+
+      const next = await call('setTor', wantPrivate ? { isPrivate: wanted } : { enabled: wanted });
+
+      line('');
+      if (wantPrivate && wanted) {
+        line('  private mode ON.', 'hot');
+        sys('  your card will carry an onion address and nothing else — no ipv4,');
+        sys('  no ipv6, no lan. the router is not asked for anything, the local');
+        sys('  network beacon stays quiet, and friends are never told an ip.');
+        sys('  neither of you can learn where the other is.');
+        line('');
+        sys('  it is slower — a circuit costs seconds where a direct dial costs');
+        sys('  milliseconds — and it needs tor running on both machines.');
+      } else if (wantPrivate) {
+        line('  private mode off.', 'sys');
+      } else if (wanted) {
+        line('  tor enabled.', 'hot');
+        sys('  an onion address is added to your card alongside your ip ones.');
+        sys('  direct paths are tried first because they are faster; tor is the');
+        sys('  one that works when nothing else does.');
+      } else {
+        line('  tor off.', 'sys');
+      }
+
+      line('');
+      line('  restart meshchat for this to take effect.', 'err');
+      sys('  then run /card and send the new code to your friend — the old one');
+      sys('  does not carry your onion address.');
       line('');
       return;
     }

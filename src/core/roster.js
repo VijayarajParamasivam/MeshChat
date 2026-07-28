@@ -20,6 +20,7 @@ const lan = require('./lan');
 const portal = require('./portal');
 const punch = require('./punch');
 const store = require('./store');
+const tor = require('./tor');
 const transport = require('./transport');
 
 const BASE_PORT = 47777;
@@ -120,6 +121,8 @@ class Mesh extends EventEmitter {
 
     this.server = null;
     this.beacon = null;
+    this.tor = null;
+    this.onion = null;
     this.hub = null;
     this.punching = new Set();
     this.port = null;
@@ -135,6 +138,26 @@ class Mesh extends EventEmitter {
 
   // --- lifecycle ----------------------------------------------------------
 
+  /**
+   * Private mode: your address must not be learnable by anybody, including the
+   * friend you are talking to.
+   *
+   * That is a stronger claim than "we use Tor", and it takes more than adding an
+   * onion address. Every other way this app reveals where it is has to be shut
+   * off too — the card must carry no IP, the endpoint announcements that keep
+   * rotating addresses fresh must stop, the router must not be asked for a
+   * pinhole, and the multicast beacon must stop naming us on the local network.
+   * One of those left running would quietly undo the rest.
+   */
+  get private() {
+    return Boolean(store.readSettings().private);
+  }
+
+  get torEnabled() {
+    const settings = store.readSettings();
+    return Boolean(settings.tor || settings.private);
+  }
+
   async start() {
     for (const friend of store.readFriends()) this.friends.set(friend.id, friend);
 
@@ -143,6 +166,19 @@ class Mesh extends EventEmitter {
     // (slow) router negotiation still have something valid to greet them with.
     this._rebuildCard();
     this.log(`listening on tcp ${this.port}`);
+
+    if (this.torEnabled) await this._startTor();
+
+    // Everything below reaches out to the network or announces us on it, and in
+    // private mode all of it is a leak rather than a feature. Tor already made
+    // us reachable without any of it.
+    if (this.private) {
+      this._rebuildCard();
+      this.log('private mode: no ip is published, announced or asked for');
+      this.redialTimer = setInterval(() => this._redialAll(), REDIAL_INTERVAL_MS);
+      this._redialAll();
+      return;
+    }
 
     const status = await portal.open(this.port, { onLog: (m) => this.log(m) });
     this._rebuildCard();
@@ -187,6 +223,56 @@ class Mesh extends EventEmitter {
       }
     }
     throw new Error('no free port in range');
+  }
+
+  /**
+   * Bring up Tor and publish an onion service pointing at our listener.
+   *
+   * The onion needs no firewall traversal of any kind: Tor only ever makes
+   * outbound connections, and outbound is the one thing every carrier permits.
+   * The service simply forwards to the TCP listener already running, so nothing
+   * above this line — handshake, framing, encryption — knows the difference.
+   *
+   * Failure is not fatal unless private mode is on, where falling back to
+   * direct connections would publish the address the user asked to hide.
+   */
+  async _startTor() {
+    try {
+      this.tor = new tor.Tor({
+        dataDir: require('path').join(store.root, 'tor'),
+        onionKey: store.readSettings().onionKey || null,
+      });
+      this.tor.on('log', (m) => this.log(m));
+
+      await this.tor.start();
+      const { address, key } = await this.tor.publish(this.port, this.port);
+
+      this.onion = address;
+      // Saved so the address survives a restart — it is derived from this key,
+      // and losing it makes every friend's card point at nothing.
+      if (key) store.writeSettings({ onionKey: key });
+
+      this._rebuildCard();
+      return true;
+    } catch (err) {
+      this.tor = null;
+      this.onion = null;
+
+      if (err.code === 'ENOTOR') {
+        for (const row of err.hint || [err.message]) this.log(row);
+      } else {
+        this.log(`tor: ${err.message}`);
+      }
+
+      if (this.private) {
+        // Refusing to start is the safe failure. Quietly carrying on over plain
+        // IP would hand out the address the user turned this on to conceal.
+        throw new Error(
+          'private mode needs Tor, and Tor did not start. Nothing was published.'
+        );
+      }
+      return false;
+    }
   }
 
   /**
@@ -362,6 +448,9 @@ class Mesh extends EventEmitter {
     clearInterval(this.cardTimer);
     if (this.beacon) this.beacon.stop();
     if (this.hub) this.hub.stop();
+    // Killing tor takes the onion service down with it, so we stop being
+    // advertised rather than staying published and unanswered.
+    if (this.tor) this.tor.stop();
     for (const link of this.links.values()) link.close();
     this.links.clear();
     if (this.server) this.server.close();
@@ -381,6 +470,13 @@ class Mesh extends EventEmitter {
 
   /** Every address a friend could currently reach us on, best first. */
   _localEndpoints() {
+    // In private mode the onion is the whole list. Not "first" — the only one.
+    // An IP alongside it would be handed to the peer in the card and in every
+    // endpoint announcement, which is exactly what was meant to be hidden.
+    if (this.private) {
+      return this.onion ? [{ type: 'onion', host: this.onion, port: this.port }] : [];
+    }
+
     const status = portal.status() || {};
     const lanIp = status.lanIp || portal.lanAddress();
     const ip6 = status.ip6 || portal.globalIPv6Addresses();
@@ -564,10 +660,17 @@ class Mesh extends EventEmitter {
       // Remember the address they actually arrived from. When a friend's address
       // changes, this is usually how we learn the new one — effectively they act
       // as our address oracle, with no third party needed to report it.
+      //
+      // Not over Tor, though. A peer arriving through the onion service appears
+      // to come from 127.0.0.1, which is neither true nor useful, and recording
+      // it would put a bogus endpoint in their card. In private mode the whole
+      // idea is unwanted anyway: we do not want to know where they are.
       const host = (link.remoteAddress || '').replace(/^::ffff:/, '');
+      const viaTor = this.private || host === '127.0.0.1' || host === '::1';
       const listenPort = link.peer.endpoints?.[0]?.port;
       const type = describeFamily(link.remoteAddress) === 'ipv6' ? 'ip6' : 'wan';
-      const observed = host && listenPort ? [{ type, host, port: listenPort }] : [];
+      const observed =
+        !viaTor && host && listenPort ? [{ type, host, port: listenPort }] : [];
       this._adopt(link, observed);
     });
     link.once('failed', (reason) => this.log(`rejected inbound link: ${reason}`));
@@ -709,9 +812,71 @@ class Mesh extends EventEmitter {
     return result || { ok: false, reasons: ['a punch is already in progress'] };
   }
 
+  torStatus() {
+    const settings = store.readSettings();
+    return {
+      binary: tor.find(),
+      hint: tor.installHint(),
+      running: Boolean(this.tor?.ready),
+      onion: this.onion,
+      port: this.port,
+      enabled: Boolean(settings.tor),
+      private: Boolean(settings.private),
+    };
+  }
+
+  /**
+   * Turn Tor or private mode on or off.
+   *
+   * Takes effect on restart rather than live. Publishing an onion, tearing down
+   * the beacon and withdrawing a port mapping midway through a session leaves a
+   * window where some of the old state is still advertised, and for a setting
+   * whose whole purpose is "reveal nothing" a half-applied state is worse than
+   * asking the user to restart.
+   */
+  setTor({ enabled, isPrivate }) {
+    const patch = {};
+    if (enabled !== undefined) patch.tor = Boolean(enabled);
+    if (isPrivate !== undefined) {
+      patch.private = Boolean(isPrivate);
+      if (isPrivate) patch.tor = true; // private mode has no meaning without it
+    }
+    return store.writeSettings(patch);
+  }
+
   /** Seconds until the next shared punch window, so both ends can line up. */
   nextPunchWindowMs() {
     return punch.msUntilWindow();
+  }
+
+  /**
+   * Dial one endpoint by whichever route its type calls for.
+   *
+   * An onion address goes through Tor's SOCKS port and comes back as an ordinary
+   * socket, so the handshake above it is identical either way — the same reason
+   * the punched UDP session could be dropped in unchanged.
+   */
+  _dialEndpoint(endpoint, expectId) {
+    if (endpoint.type === 'onion' || tor.isOnion(endpoint.host)) {
+      if (!this.tor?.ready) {
+        const error = new Error('tor is not running, so onion addresses cannot be dialled');
+        error.code = 'ENOTOR';
+        return Promise.reject(error);
+      }
+      return this.tor
+        .dial(endpoint.host, endpoint.port)
+        .then((socket) => transport.overStream(socket, this._context(), expectId, tor.DIAL_TIMEOUT_MS));
+    }
+
+    // Never let a plain IP be dialled while private mode is on: the connection
+    // itself would reveal this machine's address to whatever is at the far end.
+    if (this.private) {
+      const error = new Error('private mode refuses to dial anything but an onion address');
+      error.code = 'EPRIVATE';
+      return Promise.reject(error);
+    }
+
+    return transport.dial(endpoint.host, endpoint.port, this._context(), expectId, DIAL_TIMEOUT_MS);
   }
 
   /**
@@ -747,8 +912,7 @@ class Mesh extends EventEmitter {
         timers.push(
           setTimeout(() => {
             if (settled) return oneDone();
-            transport
-              .dial(endpoint.host, endpoint.port, this._context(), expectId, DIAL_TIMEOUT_MS)
+            this._dialEndpoint(endpoint, expectId)
               .then((link) => finish(link))
               .catch((error) => onFailure(endpoint, error))
               .finally(oneDone);
@@ -782,14 +946,26 @@ class Mesh extends EventEmitter {
    * public address. A LAN address on some *other* subnet is worthless, so it goes last.
    */
   _orderEndpoints(endpoints = []) {
+    // Private mode has exactly one kind of address it is willing to use.
+    if (this.private) {
+      return endpoints.filter((e) => e.type === 'onion' || tor.isOnion(e.host));
+    }
+
     const prefix = portal.lanAddress().split('.').slice(0, 3).join('.');
     const score = (e) => {
+      if (e.type === 'onion' || tor.isOnion(e.host)) return 4;
       if (e.type === 'ip6') return 0;
       if (e.host.startsWith(`${prefix}.`)) return 1;
       if (e.type === 'lan') return 3;
       return 2;
     };
-    return [...endpoints].filter((e) => !this._isSelf(e)).sort((a, b) => score(a) - score(b));
+    // Onion sorts last, not because it is worst but because it is slowest: a
+    // circuit costs seconds where a direct dial costs milliseconds. It is the
+    // one that always works, so it is the one worth waiting for.
+    return [...endpoints]
+      .filter((e) => !this._isSelf(e))
+      .filter((e) => e.type !== 'onion' || this.tor?.ready)
+      .sort((a, b) => score(a) - score(b));
   }
 
   _backOff(id) {

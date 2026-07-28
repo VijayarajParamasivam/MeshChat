@@ -156,6 +156,42 @@ If it does fail on all of them, one end genuinely needs a connection that accept
 inbound: wired broadband with an IPv6 pinhole open for TCP and UDP 47777. Only
 one, though — once either side is reachable, the other can always dial out to it.
 
+### When the carrier wins: Tor
+
+Everything above fights for a direct path. On two mobile connections there isn't
+one to win — the carrier drops unsolicited inbound at its core, far upstream of
+anything you can configure, and no traversal technique reaches past it.
+
+`/tor on` sidesteps the fight instead of trying to win it. Tor only ever makes
+**outbound** connections — to introduction points, then to a rendezvous point
+both sides dial out to — and outbound is the one thing every network permits.
+Nothing has to arrive at your address unsolicited, so nothing can be dropped.
+That single property replaces UPnP, pinholes, punching and port forwarding at
+once. It's the same reason WhatsApp works everywhere.
+
+`/private on` goes further: your card then carries an onion address and **nothing
+else**. No IPv4, no IPv6, no LAN address. The router is never asked for a
+mapping, the multicast beacon stays silent, friends are never sent an endpoint
+list, and the app refuses to dial anything that isn't an onion. Neither of you
+can learn where the other is, and only the card is ever shared.
+
+Both need Tor installed. MeshChat finds Tor Browser's bundled binary
+automatically and never opens the browser, or set `MESHCHAT_TOR` to a standalone
+`tor.exe`. It runs Tor with its own data directory inside MeshChat's store, so a
+Tor you use for anything else is untouched.
+
+**The honest trade.** This is no longer host-free. Tor is thousands of volunteer
+relays and nine hardcoded directory authorities — real infrastructure nobody here
+owns, and a reversal of the rule the rest of this project follows. What survives
+is the property that actually matters: none of it can read a message or work out
+who is talking to whom, because frames are sealed before they enter a circuit and
+identities are keys rather than addresses. The Ed25519 handshake still runs inside
+the circuit, so a hostile relay gets exactly what an eavesdropper on a LAN gets.
+
+It is also slower — a circuit costs seconds where a direct dial costs
+milliseconds — which is why direct paths are still tried first unless private
+mode forbids them.
+
 ## Using it
 
 First launch asks for a handle. That's just a label — your real identity is an
@@ -178,6 +214,8 @@ the only way they could know your address is that you gave them the card.
 /net               connection diagnostics
 /try <who>         force a connection attempt and show why it failed
 /punch <who>       hole-punch when neither side can be dialled
+/tor on            route over Tor — works anywhere, hides both IPs
+/private on        Tor only: publish no IP at all, ever
 /firewall          allow inbound connections (asks for admin)
 /export            back up your identity
 ```
@@ -291,6 +329,13 @@ layer — including reordering and duplicates, which UDP produces and TCP never
 does — then runs a full identity handshake over a punched session to confirm the
 crypto above can't tell the transport changed underneath it.
 
+`test/tor.js` asserts the exact bytes of the SOCKS5 handshake — most importantly
+that the destination leaves as a domain name, since an IP there would mean this
+machine was resolving .onion addresses locally and leaking who it is contacting —
+and checks every privacy invariant of private mode: that only an onion is
+published, that stored IP endpoints are discarded rather than merely
+deprioritised, and that dialling a plain address is refused outright.
+
 Those run on loopback, so they prove the mechanics rather than that your carrier
 permits them. `npm run punch-test -- <address>`, run on both machines at once, is
 the test for that.
@@ -305,6 +350,7 @@ src/core/identity.js   key generation, Mesh ID derivation
 src/core/portal.js     IPv6 discovery, UPnP + NAT-PMP port mapping
 src/core/pinhole.js    IPv6 firewall pinholes over UPnP IGDv2 and PCP
 src/core/punch.js      UDP hole punching and its reliability layer
+src/core/tor.js        onion service, SOCKS5 dialer, tor process control
 src/core/firewall.js   Windows inbound allow rule
 src/core/card.js       signed contact codes
 src/core/transport.js  framing, handshake, TCP server and dialer

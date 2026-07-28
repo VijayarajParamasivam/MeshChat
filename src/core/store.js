@@ -131,8 +131,30 @@ function flush() {
   for (const peerId of conversations.keys()) saveConversation(peerId);
 }
 
+// --- settings -------------------------------------------------------------
+
+/**
+ * Small persistent knobs: whether Tor is on, whether private mode is on, and
+ * the onion service key.
+ *
+ * The key lives here rather than with the identity because it is a different
+ * kind of secret — losing the identity key costs you your name, while losing
+ * this one only costs you your address, and every friend's card goes stale.
+ */
+function readSettings() {
+  return readJson(filePath('settings.json'), {});
+}
+
+function writeSettings(patch) {
+  const next = { ...readSettings(), ...patch };
+  writeJson(filePath('settings.json'), next);
+  return next;
+}
+
 module.exports = {
   init,
+  readSettings,
+  writeSettings,
   readIdentity,
   writeIdentity,
   readFriends,

@@ -31,7 +31,7 @@
   "scripts": {
     "start": "electron .",
     "start:b": "node scripts/second-instance.js",
-    "test": "node test/crypto-and-transport.js && node test/ipv6.js && node test/punch.js",
+    "test": "node test/crypto-and-transport.js && node test/ipv6.js && node test/punch.js && node test/tor.js",
     "punch-test": "node scripts/punch-test.js"
   },
   "devDependencies": {
