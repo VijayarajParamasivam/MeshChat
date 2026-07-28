@@ -1,8 +1,13 @@
 'use strict';
 
 /**
- * The wire: plain TCP straight between two machines, with a mutual-proof
- * handshake and an encrypted channel on top.
+ * The wire: a mutual-proof handshake and an encrypted channel, carried inside a
+ * Tor circuit.
+ *
+ * Nothing here knows that. It is handed a stream and speaks the same protocol it
+ * would over a LAN cable, which is the point — the encryption below does not
+ * depend on the transport keeping any promises, and the transport is not trusted
+ * to. A relay carrying these bytes sees what an eavesdropper on a LAN sees.
  *
  * Frame layout is [4-byte big-endian length][1-byte tag][body]. The tag says
  * whether the body is plaintext handshake JSON (0) or an AES-GCM sealed payload
@@ -23,7 +28,12 @@ const card = require('./card');
 const TAG_PLAIN = 0;
 const TAG_SEALED = 1;
 const MAX_FRAME = 1024 * 1024;
-const HANDSHAKE_TIMEOUT_MS = 10000;
+/**
+ * Generous because every round trip crosses six relays. Two exchanges that cost
+ * microseconds on a LAN cost seconds here, and cutting them off early would
+ * abandon handshakes that were about to succeed.
+ */
+const HANDSHAKE_TIMEOUT_MS = 45000;
 const PING_INTERVAL_MS = 20000;
 const PING_TIMEOUT_MS = 60000;
 
@@ -221,16 +231,18 @@ class Link extends EventEmitter {
  * rebuilt whenever the profile or external address changes, and each incoming
  * connection must be greeted with the current one.
  */
-function listen(port, getCtx, onLink) {
+function listen(port, host, getCtx, onLink) {
   return new Promise((resolve, reject) => {
     const server = net.createServer((socket) => {
       onLink(new Link(socket, getCtx()));
     });
 
     server.once('error', reject);
-    // '::' binds dual-stack: one socket accepts both IPv6 and IPv4 peers. IPv6
-    // is the path that actually works without NAT, so it must not be optional.
-    server.listen(port, '::', () => {
+    // The host is explicit and, in practice, always loopback: the only thing
+    // that connects here is our own Tor forwarding from the onion service.
+    // Binding a real interface would accept direct connections and give away
+    // the address the onion exists to keep private.
+    server.listen(port, host, () => {
       server.removeListener('error', reject);
       resolve(server);
     });
@@ -240,11 +252,11 @@ function listen(port, getCtx, onLink) {
 /**
  * Run the handshake over an already-connected stream.
  *
- * Split out of `dial` because a punched UDP session arrives already open —
- * there is no connect step to wait for — and because `Link` is deliberately
- * symmetric: both ends send `hello` and both answer with `proof`, so neither
- * has to be designated the caller. That is what lets two peers who dialled each
- * other simultaneously end up with one working channel instead of a deadlock.
+ * A Tor circuit arrives already open — there is no connect step to wait for —
+ * and `Link` is deliberately symmetric: both ends send `hello` and both answer
+ * with `proof`, so neither has to be designated the caller. That is what lets
+ * two peers who dialled each other at once end up with one working channel
+ * rather than a deadlock.
  */
 function overStream(stream, ctx, expectId = null, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
@@ -280,172 +292,4 @@ function overStream(stream, ctx, expectId = null, timeoutMs = 12000) {
   });
 }
 
-/**
- * Dial a friend directly. Resolves only once the handshake has completed and
- * the peer has proven its identity, so a resolved Link is always trustworthy.
- */
-function dial(host, port, ctx, expectId, timeoutMs = 8000) {
-  return new Promise((resolve, reject) => {
-    const socket = net.createConnection({ host, port });
-    let settled = false;
-
-    // Carry the OS error code through. Which one it is says a great deal:
-    // a refusal means the packets arrived, a timeout means they vanished.
-    const fail = (reason, code) => {
-      if (settled) return;
-      settled = true;
-      try {
-        socket.destroy();
-      } catch {
-        /* already gone */
-      }
-      const error = new Error(reason);
-      error.code = code || 'EFAIL';
-      reject(error);
-    };
-
-    const timer = setTimeout(
-      () => fail(`no reply within ${timeoutMs}ms`, 'ETIMEDOUT'),
-      timeoutMs
-    );
-
-    socket.once('error', (err) => fail(err.message, err.code));
-
-    socket.once('connect', () => {
-      const link = new Link(socket, ctx, { expectId });
-
-      link.once('ready', () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(link);
-      });
-
-      link.once('failed', (reason) => {
-        clearTimeout(timer);
-        fail(reason, 'EHANDSHAKE');
-      });
-    });
-  });
-}
-
-/**
- * TCP simultaneous open, for carriers that pass TCP but filter UDP.
- *
- * Same idea as the UDP punch — both ends send from their own port to the other's
- * so the two flows mirror — but TCP forces one extra constraint. Windows will
- * not let an outbound socket bind a port a listener already holds (verified:
- * EADDRINUSE even with SO_REUSEADDR), so this cannot reuse the app's port and
- * needs one of its own.
- *
- * Nothing listens on that port, on either side. That sounds broken and is in
- * fact the mechanism: two sockets that are both in SYN_SENT toward each other
- * complete the handshake between themselves, with no listening socket involved
- * anywhere. It is the one TCP state transition that needs no server.
- *
- * The port is derived rather than exchanged, so contact cards do not change: the
- * peer already knows our app port, and offsetting it lands clear of both the
- * multi-instance range and the discovery port.
- *
- * The two failure modes behave very differently, and only one of them matters:
- *
- *   - On a path that DROPS packets — the carrier firewall this exists for — the
- *     socket sits in SYN_SENT for the whole window while Windows retransmits.
- *     Both ends parked in SYN_SENT toward each other is exactly the state that
- *     completes, so the single long attempt is the one that works.
- *   - On a path that REFUSES, an RST comes back in microseconds and tears the
- *     socket down before the peer's SYN can meet it. Retrying helps a little,
- *     but a refusing path means nothing is blocking us in the first place and
- *     the ordinary dial would already have succeeded.
- *
- * So this is untestable over loopback, where every SYN to a closed port is
- * refused instantly. Its target is the case where the network stays silent.
- */
-function simultaneousOpen(host, port, localPort, ctx, expectId, timeoutMs = 12000) {
-  return new Promise((resolve, reject) => {
-    const deadline = Date.now() + timeoutMs;
-    let settled = false;
-    let socket = null;
-    let retry = null;
-    let lastCode = 'ETIMEDOUT';
-
-    // The deadline needs its own timer, not just a check on each retry. On the
-    // path this is built for the socket sits in SYN_SENT without ever erroring,
-    // so a retry-driven check would never run and the caller would be held for
-    // however long the OS takes to give up — about 21s on Windows.
-    const overall = setTimeout(() => fail(), timeoutMs);
-
-    const cleanup = () => {
-      clearTimeout(retry);
-      if (socket) {
-        try {
-          socket.destroy();
-        } catch {
-          /* already gone */
-        }
-        socket = null;
-      }
-    };
-
-    const fail = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(overall);
-      cleanup();
-      const error = new Error(`simultaneous open did not complete (last: ${lastCode})`);
-      error.code = lastCode === 'EADDRINUSE' ? 'EADDRINUSE' : 'EPUNCHFAIL';
-      reject(error);
-    };
-
-    const attempt = () => {
-      if (settled) return;
-      if (Date.now() >= deadline) return fail();
-
-      cleanup();
-      socket = net.createConnection({ host, port, localPort, localAddress: '::' });
-
-      socket.once('error', (err) => {
-        lastCode = err.code || 'EFAIL';
-        // A port we cannot bind will never become bindable inside this window.
-        if (lastCode === 'EADDRINUSE') return fail();
-        // Jittered, so two peers retrying in lockstep don't stay in lockstep
-        // and miss each other the same way every time.
-        retry = setTimeout(attempt, 300 + Math.floor(Math.random() * 400));
-      });
-
-      socket.once('connect', () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(retry);
-        clearTimeout(overall);
-
-        const live = socket;
-        socket = null;
-
-        const link = new Link(live, ctx, { expectId });
-        const remaining = Math.max(3000, deadline - Date.now());
-        const handshake = setTimeout(() => {
-          link.close();
-          const error = new Error('connected but the handshake stalled');
-          error.code = 'ETIMEDOUT';
-          reject(error);
-        }, remaining);
-
-        link.once('ready', () => {
-          clearTimeout(handshake);
-          resolve(link);
-        });
-        link.once('failed', (reason) => {
-          clearTimeout(handshake);
-          const error = new Error(reason);
-          error.code = 'EHANDSHAKE';
-          reject(error);
-        });
-      });
-    };
-
-    attempt();
-  });
-}
-
-module.exports = { Link, listen, dial, overStream, simultaneousOpen };
+module.exports = { Link, listen, overStream };

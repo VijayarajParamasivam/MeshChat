@@ -3,8 +3,14 @@
 /**
  * A contact card is the thing you copy and send to a friend over any channel you
  * like — WhatsApp, email, a sticky note. It carries who you are (Mesh ID and both
- * public keys) and where to reach you (LAN and WAN endpoints), signed so that a
- * card altered in transit is rejected.
+ * public keys) and where to reach you, signed so that a card altered in transit
+ * is rejected.
+ *
+ * "Where" is a single onion address, which is a public key rather than a
+ * location. The card is therefore the only thing you ever hand over, and it
+ * reveals nothing about where you are — not your IP, not your ISP, not your
+ * country. Handing it to the wrong person costs you an unwanted connection
+ * attempt, not your address.
  *
  * This is the only "discovery" step in the app, and it happens out of band by
  * design. No directory, no lookup service, nothing to be taken offline.

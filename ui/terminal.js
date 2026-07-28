@@ -67,8 +67,8 @@ function banner() {
   line(' | |\\/| / -_|_-< \' \\ (__| \' \\/ _` |  _|', 'banner');
   line(' |_|  |_\\___/__/_||_\\___|_||_\\__,_|\\__|', 'banner');
   line('');
-  line(' no servers. no relays. no middlemen.', 'hot');
-  line(' your device dials their device, and that is the whole network.', 'sys');
+  line(' every connection is an onion service.', 'hot');
+  line(' no ip of yours is ever published, sent, or dialled.', 'sys');
   line('');
 }
 
@@ -90,8 +90,7 @@ async function enterReady(boot) {
   sys(`mesh id  ${boot.profile.id}`);
   if (boot.instance) sys(`instance ${boot.instance} (separate identity for testing)`);
 
-  if (boot.portal) describePortal(boot.portal);
-  warnAboutFirewall(boot.firewall, boot.portal);
+  if (boot.tor) describeTor(boot.tor);
 
   const friends = boot.friends?.length ? boot.friends : await call('friends');
   if (friends.length) {
@@ -106,36 +105,21 @@ async function enterReady(boot) {
   promptSymbol();
 }
 
-/** IPv6 literals need brackets to be readable next to a port. */
-function addr(host, port) {
-  return String(host).includes(':') ? `[${host}]:${port}` : `${host}:${port}`;
-}
+function describeTor(t) {
+  if (!t) return;
 
-function describePortal(portal) {
-  if (!portal) return;
-
-  if (portal.ip6Reachable) {
-    sys(`portal   public IPv6 — ${portal.ip6[0]}`);
-    line('  no NAT between you and the internet. this is a genuinely direct path.', 'sys');
-  } else if (portal.ipv4Reachable) {
-    sys(`portal   ${portal.method} — ${portal.externalIp}:${portal.externalPort}`);
-  } else {
-    sys('portal   no public address — same-network chat only');
-    line(`  ${portal.ipv4Note || portal.note}`, 'sys');
+  if (!t.running) {
+    sys('tor      not running — nothing can connect');
+    return;
   }
-}
 
-function warnAboutFirewall(firewall, portal) {
-  if (!firewall?.supported || firewall.installed) return;
-  if (!portal?.reachable) return;
-
-  line('');
-  line('! you have a direct path to the internet, but windows is blocking inbound.', 'err');
+  sys(`onion    ${t.onion}`);
   line(
-    `  this network is on the "${firewall.profile}" profile, which drops unsolicited`,
-    'err'
+    t.published
+      ? '  reachable from anywhere. no firewall, router or ip involved.'
+      : '  publishing — friends may need a minute before they can reach you.',
+    t.published ? 'hot' : 'sys'
   );
-  line('  connections by default. run /firewall to allow them.', 'err');
 }
 
 // --- commands -------------------------------------------------------------
@@ -148,22 +132,16 @@ const HELP = [
   '',
   '  /card              print your contact code',
   '  /copy              copy your contact code to the clipboard',
-  '  /add <code>        add a friend from their code (or a /nearby mesh id)',
+  '  /add <code>        add a friend from their code',
   '  /paste             add a friend from a code already on your clipboard',
   '  /forget <who>      remove a friend',
   '',
   '  /friends           who you know and who is online',
-  '  /nearby            meshchat instances seen on this network',
   '  /chat <who>        open a conversation',
   '  /leave             close the conversation',
   '',
-  '  /net               connection diagnostics',
-  '  /try <who>         force a connection attempt and show why it fails',
-  '  /punch <who>       hole-punch to a friend nobody can dial (both must be online)',
-  '  /ipv6              why this machine has no IPv6, and how to fix it',
-  '  /tor               route over Tor — works anywhere, hides both IPs',
-  '  /private           Tor only: publish no IP at all, ever',
-  '  /firewall          allow inbound connections (asks for admin)',
+  '  /tor               your onion address and whether it is reachable',
+  '  /try <who>         force a connection attempt and show why it failed',
   '  /export            write an identity backup file',
   '  /import <path>     restore an identity backup',
   '  /clear             wipe the screen',
@@ -284,21 +262,6 @@ async function runCommand(raw) {
       return;
     }
 
-    case 'nearby': {
-      const peers = await call('nearby');
-      if (!peers.length) return sys('nothing else on this network right now');
-      line('');
-      for (const peer of peers) {
-        line(
-          `  ${peer.known ? '[known]  ' : '[new]    '}${peer.id}  ${peer.host}:${peer.port}`,
-          'sys'
-        );
-      }
-      line('');
-      sys('/add <mesh id> to connect to one of these');
-      return;
-    }
-
     case 'chat': {
       if (!arg) return err('usage: /chat <name or mesh id>');
       await openChat(arg);
@@ -311,72 +274,21 @@ async function runCommand(raw) {
       sys('conversation closed');
       return;
 
-    case 'net': {
-      const net = await call('net');
-      if (!net) return err('engine not running');
-      const fw = net.firewall || {};
+    case 'tor': {
+      const t = await call(`tor`);
       line('');
-
-      if (net.ip6?.length) {
-        sys(`ipv6         ${addr(net.ip6[0], net.port)}`);
-        for (const extra of net.ip6.slice(1)) line(`             ${addr(extra, net.port)}`, 'sys');
-        line('             public and routable — nothing is translating it', 'sys');
-        // Having the address is only half of it; the router still has to be
-        // willing to let strangers in on it.
-        if (net.ip6Pinhole) {
-          line(`             router is allowing inbound (${net.ip6PinholeMethod})`, 'sys');
-        } else {
-          line('             but the router was not willing to open a pinhole,', 'sys');
-          line('             so inbound may still be dropped. /punch works around it.', 'sys');
-        }
-      } else {
-        sys('ipv6         none that the internet can reach');
-        // ipconfig shows these on every machine alive, so spell out why they
-        // don't count rather than leaving a bare "none" to argue with.
-        for (const host of net.ip6LinkLocal || []) {
-          line(`             ${host}  link-local — never leaves your cable`, 'sys');
-        }
-        for (const host of net.ip6UniqueLocal || []) {
-          line(`             ${host}  private range — like 192.168, not routable`, 'sys');
-        }
-        if ((net.ip6LinkLocal || []).length || (net.ip6UniqueLocal || []).length) {
-          line('             a real one starts with 2 or 3. run /ipv6 for why.', 'sys');
-        }
-      }
-
-      sys(`ipv4         ${net.lanIp}:${net.lanPort}  (${net.method})`);
-      if (net.externalIp) sys(`ipv4 public  ${net.externalIp}:${net.externalPort}`);
-      else if (net.cgnat) line('             carrier-grade NAT — no ipv4 address is yours', 'sys');
-
-      sys(
-        `firewall     ${
-          !fw.supported
-            ? 'not managed here'
-            : fw.installed
-              ? 'inbound allowed'
-              : `blocking inbound (${fw.profile} profile)`
-        }`
-      );
-
+      sys(`onion    ${t.onion || 'not published yet'}`);
+      sys(`status   ${t.running ? (t.published ? 'published and reachable' : 'published, still propagating') : 'not running'}`);
+      sys(`tor      ${t.binary || 'not found'}`);
+      sys(`friends  ${t.friends} known, ${t.online} online`);
       line('');
-      const openable = !fw.supported || fw.installed;
-      // A global IPv6 address is not the same as being reachable at it. Saying
-      // "friends can dial you" on the strength of the address alone contradicts
-      // the pinhole warning printed a few lines above, and it is exactly the
-      // conflation that sends people hunting for a fault on a healthy machine.
-      const confirmed = net.ipv4Reachable || (net.ip6?.length && net.ip6Pinhole);
-
-      if (!openable) {
-        line('  you have a direct path, but the firewall is shut. run /firewall.', 'err');
-      } else if (confirmed) {
-        line('  friends can dial you directly right now.', 'hot');
-      } else if (net.ip6?.length) {
-        line('  you have a public address, but nothing has confirmed inbound', 'sys');
-        line('  actually reaches it — your router or carrier may still drop it.', 'sys');
-        line('  run /try <friend> to find out which. /punch works around it.', 'sys');
+      if (!t.running) {
+        line('  tor is not running, so nothing can connect. restart meshchat.', 'err');
+      } else if (!t.published) {
+        line('  the descriptor is still reaching the directory. give it a minute.', 'sys');
       } else {
-        line('  no public address here, so only same-WiFi chat works.', 'err');
-        line(`  ${net.ipv4Note || ''}`, 'sys');
+        line('  friends can reach you at that address from anywhere.', 'hot');
+        line('  no ip of yours is published, sent or dialled — only this.', 'sys');
       }
       line('');
       return;
@@ -384,161 +296,27 @@ async function runCommand(raw) {
 
     case 'try': {
       if (!arg) return err('usage: /try <who>');
-      sys(`dialling ${arg}...`);
+      sys(`building a circuit to ${arg} — this takes a few seconds...`);
       const result = await call('probe', arg);
 
       if (result.alreadyOnline) return sys(`${result.name} is already connected`);
 
       line('');
-      sys(`addresses on record for ${result.name}:`);
-      if (!result.endpoints.length) line('  (none — their card had no reachable address)', 'err');
-      for (const e of result.endpoints) {
-        const host = String(e.host).includes(':') ? `[${e.host}]:${e.port}` : `${e.host}:${e.port}`;
-        line(`  ${e.type.padEnd(4)} ${host}`, 'sys');
-      }
+      sys(`onion addresses on record for ${result.name}:`);
+      if (!result.endpoints.length) line('  (none — their card had no onion address)', 'err');
+      for (const e of result.endpoints) line(`  ${e.host}:${e.port}`, 'sys');
 
       line('');
       if (result.ok) {
         line(`  connected to ${result.name}.`, 'hot');
       } else {
-        line('  every address failed:', 'err');
         for (const reason of result.reasons) line(`  ${reason}`, 'err');
         line('', 'sys');
-        line('  if they have no ipv6 and you do, there is no shared path at all.', 'sys');
-        line('  have them run /ipv6 on their machine.', 'sys');
-        line('  if you both have ipv6, try /punch — it works when neither side', 'sys');
-        line('  can be dialled, but you must both be online at the same moment.', 'sys');
+        line('  an onion answers only while their meshchat is open. there is no', 'sys');
+        line('  firewall or router involved on either side — if this fails, they', 'sys');
+        line('  are almost certainly not running it.', 'sys');
       }
       line('');
-      return;
-    }
-
-    case 'punch': {
-      if (!arg) return err('usage: /punch <who>');
-
-      line('');
-      sys('hole punching works by both machines sending at the same instant, so');
-      sys('each firewall sees the reply to something its own side already sent.');
-      sys('that only works if they have meshchat open right now — tell them to');
-      sys('run /punch back at you before you continue.');
-      line('');
-
-      const result = await call('punch', arg);
-      if (result.alreadyOnline) return sys(`${result.name} is already connected`);
-
-      sys(`waiting for the shared window (${(result.windowMs / 1000).toFixed(1)}s), then firing...`);
-      line('');
-
-      if (result.ok) {
-        line(`  connected to ${result.name} — the punch got through.`, 'hot');
-      } else {
-        line('  punch failed:', 'err');
-        for (const reason of result.reasons) line(`  ${reason}`, 'err');
-        line('', 'sys');
-        line('  if they were definitely running, one of the two networks drops', 'sys');
-        line('  reciprocal udp. mobile carriers usually do. at that point one end', 'sys');
-        line('  needs a connection that accepts inbound — wired broadband with an', 'sys');
-        line('  ipv6 pinhole open on this port.', 'sys');
-      }
-      line('');
-      return;
-    }
-
-    case 'tor':
-    case 'private': {
-      const wantPrivate = command.toLowerCase() === 'private';
-      const state = await call('tor');
-      const on = wantPrivate ? state.private : state.enabled;
-
-      // Bare command reports; an explicit on/off changes it.
-      const wanted = /^(on|off|yes|no|1|0)$/i.test(arg)
-        ? /^(on|yes|1)$/i.test(arg)
-        : null;
-
-      if (wanted === null) {
-        line('');
-        sys(`tor binary   ${state.binary || 'not found'}`);
-        sys(`tor          ${state.running ? 'running' : state.enabled ? 'enabled, not running' : 'off'}`);
-        if (state.onion) sys(`onion        ${state.onion}:${state.port}`);
-        sys(`private      ${state.private ? 'on — no ip is published' : 'off'}`);
-
-        if (!state.binary) {
-          line('');
-          for (const row of state.hint || []) line(`  ${row}`, 'sys');
-        }
-
-        line('');
-        line(`  /${wantPrivate ? 'private' : 'tor'} on   to turn it ${on ? 'back ' : ''}on`, 'sys');
-        line(`  /${wantPrivate ? 'private' : 'tor'} off  to turn it off`, 'sys');
-        line('');
-        return;
-      }
-
-      if (wanted && !state.binary) {
-        line('');
-        for (const row of state.hint || []) err(`  ${row}`);
-        line('');
-        return;
-      }
-
-      const next = await call('setTor', wantPrivate ? { isPrivate: wanted } : { enabled: wanted });
-
-      line('');
-      if (wantPrivate && wanted) {
-        line('  private mode ON.', 'hot');
-        sys('  your card will carry an onion address and nothing else — no ipv4,');
-        sys('  no ipv6, no lan. the router is not asked for anything, the local');
-        sys('  network beacon stays quiet, and friends are never told an ip.');
-        sys('  neither of you can learn where the other is.');
-        line('');
-        sys('  it is slower — a circuit costs seconds where a direct dial costs');
-        sys('  milliseconds — and it needs tor running on both machines.');
-      } else if (wantPrivate) {
-        line('  private mode off.', 'sys');
-      } else if (wanted) {
-        line('  tor enabled.', 'hot');
-        sys('  an onion address is added to your card alongside your ip ones.');
-        sys('  direct paths are tried first because they are faster; tor is the');
-        sys('  one that works when nothing else does.');
-      } else {
-        line('  tor off.', 'sys');
-      }
-
-      line('');
-      line('  restart meshchat for this to take effect.', 'err');
-      sys('  then run /card and send the new code to your friend — the old one');
-      sys('  does not carry your onion address.');
-      line('');
-      return;
-    }
-
-    case 'ipv6': {
-      const report = await call('ipv6');
-      line('');
-      if (report.global.length) {
-        for (const address of report.global) sys(`ipv6  ${address}`);
-      } else {
-        sys('ipv6  none');
-      }
-      line('');
-      line(`  ${report.verdict}`, report.global.length ? 'hot' : 'err');
-      if (report.advice.length) line('');
-      for (const row of report.advice) line(`  ${row}`, 'sys');
-      line('');
-      return;
-    }
-
-    case 'firewall': {
-      const { firewall: fw } = await call('net');
-      if (!fw.supported) return sys('nothing to configure on this platform');
-      if (fw.installed) return sys('inbound is already allowed — nothing to do');
-
-      sys('asking windows for permission — accept the administrator prompt...');
-      const result = await call('openFirewall');
-      if (!result.ok) return err(result.message);
-
-      sys(result.message);
-      sys('friends can now reach you. run /net to confirm.');
       return;
     }
 
@@ -661,7 +439,7 @@ window.addEventListener('focus', () => captureEl.focus());
 
 window.mesh.on('mesh:log', (text) => sys(text));
 
-window.mesh.on('mesh:portal', (portal) => describePortal(portal));
+window.mesh.on('mesh:ready', (status) => describeTor(status));
 
 window.mesh.on('mesh:message', ({ peerId, name, message }) => {
   if (state.active?.id === peerId) {

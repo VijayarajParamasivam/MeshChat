@@ -25,6 +25,22 @@ function check(name, condition) {
 
 const ONION = 'a'.repeat(56) + '.onion';
 
+/** A genuinely valid, correctly signed card that advertises only an IP. */
+function makeCardWithoutOnion() {
+  const c = require('../src/core/crypto');
+  const card = require('../src/core/card');
+  const signing = c.generateSigningPair();
+  const box = c.generateBoxPair();
+  const keys = {
+    signPrivate: signing.privateKey,
+    signPublic: c.exportPublic(signing.publicKey),
+    boxPrivate: box.privateKey,
+    boxPublic: c.exportPublic(box.publicKey),
+  };
+  const profile = { id: c.deriveMeshId(keys.signPublic), name: 'legacy', sigil: 'L' };
+  return card.create(profile, keys, [{ type: 'ip6', host: '2409:40f4::1', port: 47777 }]);
+}
+
 /**
  * A pretend SOCKS5 proxy that records the request it was given and then behaves
  * like a successful tunnel.
@@ -163,71 +179,70 @@ function fakeSocks({ status = 0x00, echo = null } = {}) {
 
   // --- privacy invariants --------------------------------------------------
   //
-  // These are the claims private mode makes to the user, so they are asserted
-  // rather than trusted. Each one is a separate way the app could reveal where
-  // this machine is, and leaving any single one working would undo the others.
+  // These are the claims the app makes to its user, so they are asserted rather
+  // than trusted. There is no longer a private *mode* to switch on: the engine
+  // has no access to an IP address to publish, and these tests exist to make
+  // that stay true if somebody reintroduces one.
   const os = require('os');
   const fs = require('fs');
   const path = require('path');
   const store = require('../src/core/store');
-  const { Mesh } = require('../src/core/roster');
+  const { Mesh, ONION_PORT } = require('../src/core/roster');
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'meshchat-private-'));
   store.init(dir);
-  store.writeSettings({ private: true, tor: true });
+  // addFriend compares an incoming card against our own identity, so one has to
+  // exist for that path to be exercised rather than throwing on a null.
+  require('../src/core/identity').create('tester', 'T');
 
   const mesh = new Mesh();
-  mesh.port = 47777;
   mesh.onion = ONION;
   mesh.tor = { ready: true };
 
-  check('private mode is read from settings', mesh.private === true);
-  check('enabling private mode implies tor', mesh.torEnabled === true);
-
   const published = mesh._localEndpoints();
-  check('only one endpoint is published', published.length === 1);
+  check(`only one endpoint is published`, published.length === 1);
   check('and it is the onion', published[0].type === 'onion' && published[0].host === ONION);
   check(
+    'the advertised port is the virtual onion port',
+    published[0].port === ONION_PORT
+  );
+  check(
     'no ip of any kind appears in the card',
-    !JSON.stringify(published).match(/\d+\.\d+\.\d+\.\d+|ip6|lan|wan/)
+    !JSON.stringify(published).match(/d+.d+.d+.d+|ip6|lan|wan/)
   );
 
-  // The stored card of a friend may well contain IPs from before private mode.
-  // They must be ignored, not merely deprioritised — dialling one would reveal
-  // this machine's address to whatever answered.
-  const mixed = [
+  // A stored card from an older build, or a hostile peer, may carry IPs. They
+  // must be discarded on the way in — not merely sorted last — so there is
+  // never an address in the friend list that could be dialled.
+  const friend = { id: 'MESH-X', endpoints: [] };
+  mesh._mergeEndpoints(friend, [
     { type: 'ip6', host: '2409:40f4::1', port: 47777 },
     { type: 'lan', host: '192.168.1.5', port: 47777 },
     { type: 'wan', host: '49.37.1.2', port: 47777 },
-    { type: 'onion', host: ONION, port: 47777 },
-  ];
-  const ordered = mesh._orderEndpoints(mixed);
-  check('stored ip endpoints are discarded in private mode', ordered.length === 1);
-  check('the onion is what remains', ordered[0].type === 'onion');
+    { type: 'onion', host: ONION, port: ONION_PORT },
+  ]);
+  check('ip endpoints are dropped on merge', friend.endpoints.length === 1);
+  check('the onion survives', friend.endpoints[0].host === ONION);
 
-  let refusedIp = null;
+  // The same filter guards what a live peer sends us mid-session.
+  check('ip endpoints are never dialable', mesh._orderEndpoints([
+    { type: 'ip6', host: '2409:40f4::1', port: 47777 },
+    { type: 'wan', host: '49.37.1.2', port: 47777 },
+  ]).length === 0);
+
+  check('our own onion is not dialled', mesh._orderEndpoints([
+    { type: 'onion', host: ONION, port: ONION_PORT },
+  ]).length === 0);
+
+  // A card with no onion in it cannot produce a friend at all.
+  let refusedCard = null;
   try {
-    await mesh._dialEndpoint({ type: 'ip6', host: '2409:40f4::1', port: 47777 }, 'MESH-X');
+    const stranger = makeCardWithoutOnion();
+    await mesh.addFriend(stranger);
   } catch (err) {
-    refusedIp = err.code;
+    refusedCard = err.message;
   }
-  check('dialling a plain ip is refused outright', refusedIp === 'EPRIVATE');
-
-  // With private mode off, the ordering should prefer speed but still keep the
-  // onion as the fallback that always works.
-  store.writeSettings({ private: false, tor: true });
-  const open = mesh._orderEndpoints(mixed);
-  check('normally every endpoint stays available', open.length === 4);
-  check('direct ipv6 is preferred for speed', open[0].type === 'ip6');
-  check('the onion sorts last as the slow certainty', open[open.length - 1].type === 'onion');
-
-  // An onion endpoint is useless without Tor running, and offering it would
-  // stall every dial for the full circuit timeout before failing.
-  mesh.tor = null;
-  check(
-    'onion endpoints are dropped when tor is not running',
-    !mesh._orderEndpoints(mixed).some((e) => e.type === 'onion')
-  );
+  check('a card with no onion address is refused', /onion/i.test(refusedCard || ''));
 
   fs.rmSync(dir, { recursive: true, force: true });
 

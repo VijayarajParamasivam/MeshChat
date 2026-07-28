@@ -14,9 +14,7 @@ const path = require('path');
 const fs = require('fs');
 const { app, BrowserWindow, ipcMain, clipboard } = require('electron');
 
-const firewall = require('../src/core/firewall');
 const identity = require('../src/core/identity');
-const ipv6doctor = require('../src/core/ipv6doctor');
 const store = require('../src/core/store');
 const { Mesh } = require('../src/core/roster');
 
@@ -43,7 +41,7 @@ function startEngine() {
   engine.on('status', (payload) => send('mesh:status', payload));
   engine.on('message', (payload) => send('mesh:message', payload));
   engine.on('delivered', (payload) => send('mesh:delivered', payload));
-  engine.on('portal', (payload) => send('mesh:portal', payload));
+  engine.on('ready', (payload) => send('mesh:ready', payload));
   engine.on('friends-changed', () => send('mesh:friends-changed'));
   engine.on('history-changed', (payload) => send('mesh:history-changed', payload));
 
@@ -131,8 +129,7 @@ const handlers = {
     return {
       profile,
       running: Boolean(mesh),
-      portal: mesh ? mesh.portalStatus() : null,
-      firewall: await firewall.status(),
+      tor: mesh ? mesh.status() : null,
       port: mesh ? mesh.port : null,
       friends: mesh ? mesh.list() : [],
       dataDir: store.root,
@@ -144,7 +141,7 @@ const handlers = {
     if (identity.get()) throw new Error('an identity already exists here');
     identity.create(name, sigil);
     await startEngine();
-    return { profile: identity.profile(), portal: mesh.portalStatus() };
+    return { profile: identity.profile(), tor: mesh.status() };
   },
 
   card() {
@@ -173,10 +170,6 @@ const handlers = {
     return mesh ? mesh.list() : [];
   },
 
-  nearby() {
-    return requireEngine().nearbyList();
-  },
-
   resolve(query) {
     const friend = requireEngine().resolve(query);
     return friend ? { id: friend.id, name: friend.name } : null;
@@ -194,49 +187,8 @@ const handlers = {
     return requireEngine().setProfile(patch);
   },
 
-  async net() {
-    const engine = requireEngine();
-    return {
-      ...engine.portalStatus(),
-      port: engine.port,
-      firewall: await firewall.status(),
-    };
-  },
-
-  async openFirewall() {
-    return firewall.install(requireEngine().port);
-  },
-
-  async probe(query) {
-    const engine = requireEngine();
-    const friend = engine.resolve(query);
-    if (!friend) throw new Error(`no single match for "${query}"`);
-    return { name: friend.name, ...(await engine.probe(friend.id)) };
-  },
-
-  async punch(query) {
-    const engine = requireEngine();
-    const friend = engine.resolve(query);
-    if (!friend) throw new Error(`no single match for "${query}"`);
-    return {
-      name: friend.name,
-      windowMs: engine.nextPunchWindowMs(),
-      ...(await engine.punchProbe(friend.id)),
-    };
-  },
-
   async tor() {
-    return requireEngine().torStatus();
-  },
-
-  async setTor(patch) {
-    const engine = requireEngine();
-    engine.setTor(patch || {});
-    return engine.torStatus();
-  },
-
-  async ipv6() {
-    return ipv6doctor.diagnose();
+    return requireEngine().status();
   },
 
   exportIdentity() {

@@ -13,7 +13,7 @@ const EVENTS = [
   'mesh:status',
   'mesh:message',
   'mesh:delivered',
-  'mesh:portal',
+  'mesh:ready',
   'mesh:friends-changed',
   'mesh:history-changed',
 ];

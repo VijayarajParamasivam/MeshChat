@@ -31,8 +31,7 @@
   "scripts": {
     "start": "electron .",
     "start:b": "node scripts/second-instance.js",
-    "test": "node test/crypto-and-transport.js && node test/ipv6.js && node test/punch.js && node test/tor.js",
-    "punch-test": "node scripts/punch-test.js",
+    "test": "node test/crypto-and-transport.js && node test/tor.js",
     "postinstall": "node scripts/get-tor.js",
     "get-tor": "node scripts/get-tor.js"
   },

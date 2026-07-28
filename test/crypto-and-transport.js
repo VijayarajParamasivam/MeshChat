@@ -8,6 +8,8 @@
  * Deliberately dependency-free so it runs anywhere Node runs.
  */
 
+const net = require('net');
+
 const c = require('../src/core/crypto');
 const card = require('../src/core/card');
 const transport = require('../src/core/transport');
@@ -107,7 +109,7 @@ function makePeer(name) {
   const inbound = new Promise((resolve, reject) => {
     setTimeout(() => reject(new Error('server link never became ready')), 10000);
     transport
-      .listen(PORT, () => ctxA, (link) => {
+      .listen(PORT, '127.0.0.1', () => ctxA, (link) => {
         link.once('ready', () => {
           link.on('message', (frame) => {
             if (frame.t === 'msg') link.send({ t: 'msg', id: 'r', body: `echo:${frame.body}` });
@@ -118,12 +120,17 @@ function makePeer(name) {
       })
       .then((s) => {
         server = s;
-        check('listener binds dual-stack', s.address().address === '::');
+        // Loopback only: nothing but our own Tor should ever reach this.
+        check('listener binds loopback only', s.address().address === '127.0.0.1');
       })
       .catch(reject);
   });
 
-  const dialed = await transport.dial('127.0.0.1', PORT, ctxB, a.profile.id);
+  // No dial() any more — every connection arrives as an open stream from Tor.
+  // A plain socket stands in for the circuit; the handshake cannot tell.
+  const raw = net.createConnection({ host: '127.0.0.1', port: PORT });
+  await new Promise((r) => raw.once('connect', r));
+  const dialed = await transport.overStream(raw, ctxB, a.profile.id);
   const served = await inbound;
 
   check('dialer learned the server identity', dialed.peer.id === a.profile.id);
@@ -145,7 +152,9 @@ function makePeer(name) {
   // Dialling while expecting the wrong identity must be refused.
   let mismatchCaught = false;
   try {
-    await transport.dial('127.0.0.1', PORT, ctxB, b.profile.id, 4000);
+    const wrong = net.createConnection({ host: '127.0.0.1', port: PORT });
+    await new Promise((r) => wrong.once('connect', r));
+    await transport.overStream(wrong, ctxB, b.profile.id, 4000);
   } catch {
     mismatchCaught = true;
   }
