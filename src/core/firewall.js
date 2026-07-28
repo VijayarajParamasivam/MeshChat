@@ -25,6 +25,12 @@ const TCP_RULE = 'MeshChat TCP';
 const UDP_RULE = 'MeshChat UDP';
 const LAN_DISCOVERY_PORT = 47778;
 
+/** Kept in step with punch.js — the ports punching borrows when filtered. */
+const ALT_PUNCH_PORTS = [443, 53];
+
+/** Offset of the listener-free port TCP simultaneous open uses. */
+const TCP_PUNCH_OFFSET = 100;
+
 function run(command, args, timeout = 15000) {
   return new Promise((resolve) => {
     execFile(command, args, { timeout, windowsHide: true }, (error, stdout, stderr) => {
@@ -98,12 +104,17 @@ async function install(port) {
       '@echo off',
       `netsh advfirewall firewall delete rule name="${TCP_RULE}" >nul 2>&1`,
       `netsh advfirewall firewall delete rule name="${UDP_RULE}" >nul 2>&1`,
-      `netsh advfirewall firewall add rule name="${TCP_RULE}" dir=in action=allow protocol=TCP localport=${tcpPort} profile=any`,
-      // Two UDP ports: the multicast beacon, and the app port itself for hole
-      // punching. Windows is stateful and would normally let a punch back in as
-      // the reply to our own, but only if we punched first — whoever starts
-      // second would otherwise be dropped before the exchange ever begins.
-      `netsh advfirewall firewall add rule name="${UDP_RULE}" dir=in action=allow protocol=UDP localport=${tcpPort},${LAN_DISCOVERY_PORT} profile=any`,
+      // Two TCP ports: the listener, and the offset one used for simultaneous
+      // open. Nothing listens on the second — it exists so two sockets already
+      // dialling each other can meet — but the inbound SYN still has to survive
+      // the firewall to get there.
+      `netsh advfirewall firewall add rule name="${TCP_RULE}" dir=in action=allow protocol=TCP localport=${tcpPort},${tcpPort + TCP_PUNCH_OFFSET} profile=any`,
+      // UDP: the multicast beacon, the app port for hole punching, and the two
+      // borrowed ports punching falls back to on carriers that filter by port.
+      // Windows is stateful and would normally let a punch back in as the reply
+      // to our own, but only if we punched first — whoever starts second would
+      // otherwise be dropped before the exchange ever begins.
+      `netsh advfirewall firewall add rule name="${UDP_RULE}" dir=in action=allow protocol=UDP localport=${tcpPort},${LAN_DISCOVERY_PORT},${ALT_PUNCH_PORTS.join(',')} profile=any`,
       '',
     ].join('\r\n'),
     'utf8'
@@ -139,7 +150,12 @@ async function install(port) {
 
   const after = await status();
   return after.installed
-    ? { ok: true, message: `inbound allowed on TCP ${tcpPort} and UDP ${tcpPort}, ${LAN_DISCOVERY_PORT}` }
+    ? {
+        ok: true,
+        message:
+          `inbound allowed on TCP ${tcpPort}, ${tcpPort + TCP_PUNCH_OFFSET} ` +
+          `and UDP ${tcpPort}, ${LAN_DISCOVERY_PORT}, ${ALT_PUNCH_PORTS.join(', ')}`,
+      }
     : { ok: false, message: 'the rule did not appear afterwards — was the prompt declined?' };
 }
 

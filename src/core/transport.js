@@ -329,4 +329,123 @@ function dial(host, port, ctx, expectId, timeoutMs = 8000) {
   });
 }
 
-module.exports = { Link, listen, dial, overStream };
+/**
+ * TCP simultaneous open, for carriers that pass TCP but filter UDP.
+ *
+ * Same idea as the UDP punch — both ends send from their own port to the other's
+ * so the two flows mirror — but TCP forces one extra constraint. Windows will
+ * not let an outbound socket bind a port a listener already holds (verified:
+ * EADDRINUSE even with SO_REUSEADDR), so this cannot reuse the app's port and
+ * needs one of its own.
+ *
+ * Nothing listens on that port, on either side. That sounds broken and is in
+ * fact the mechanism: two sockets that are both in SYN_SENT toward each other
+ * complete the handshake between themselves, with no listening socket involved
+ * anywhere. It is the one TCP state transition that needs no server.
+ *
+ * The port is derived rather than exchanged, so contact cards do not change: the
+ * peer already knows our app port, and offsetting it lands clear of both the
+ * multi-instance range and the discovery port.
+ *
+ * The two failure modes behave very differently, and only one of them matters:
+ *
+ *   - On a path that DROPS packets — the carrier firewall this exists for — the
+ *     socket sits in SYN_SENT for the whole window while Windows retransmits.
+ *     Both ends parked in SYN_SENT toward each other is exactly the state that
+ *     completes, so the single long attempt is the one that works.
+ *   - On a path that REFUSES, an RST comes back in microseconds and tears the
+ *     socket down before the peer's SYN can meet it. Retrying helps a little,
+ *     but a refusing path means nothing is blocking us in the first place and
+ *     the ordinary dial would already have succeeded.
+ *
+ * So this is untestable over loopback, where every SYN to a closed port is
+ * refused instantly. Its target is the case where the network stays silent.
+ */
+function simultaneousOpen(host, port, localPort, ctx, expectId, timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    let settled = false;
+    let socket = null;
+    let retry = null;
+    let lastCode = 'ETIMEDOUT';
+
+    // The deadline needs its own timer, not just a check on each retry. On the
+    // path this is built for the socket sits in SYN_SENT without ever erroring,
+    // so a retry-driven check would never run and the caller would be held for
+    // however long the OS takes to give up — about 21s on Windows.
+    const overall = setTimeout(() => fail(), timeoutMs);
+
+    const cleanup = () => {
+      clearTimeout(retry);
+      if (socket) {
+        try {
+          socket.destroy();
+        } catch {
+          /* already gone */
+        }
+        socket = null;
+      }
+    };
+
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(overall);
+      cleanup();
+      const error = new Error(`simultaneous open did not complete (last: ${lastCode})`);
+      error.code = lastCode === 'EADDRINUSE' ? 'EADDRINUSE' : 'EPUNCHFAIL';
+      reject(error);
+    };
+
+    const attempt = () => {
+      if (settled) return;
+      if (Date.now() >= deadline) return fail();
+
+      cleanup();
+      socket = net.createConnection({ host, port, localPort, localAddress: '::' });
+
+      socket.once('error', (err) => {
+        lastCode = err.code || 'EFAIL';
+        // A port we cannot bind will never become bindable inside this window.
+        if (lastCode === 'EADDRINUSE') return fail();
+        // Jittered, so two peers retrying in lockstep don't stay in lockstep
+        // and miss each other the same way every time.
+        retry = setTimeout(attempt, 300 + Math.floor(Math.random() * 400));
+      });
+
+      socket.once('connect', () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(retry);
+        clearTimeout(overall);
+
+        const live = socket;
+        socket = null;
+
+        const link = new Link(live, ctx, { expectId });
+        const remaining = Math.max(3000, deadline - Date.now());
+        const handshake = setTimeout(() => {
+          link.close();
+          const error = new Error('connected but the handshake stalled');
+          error.code = 'ETIMEDOUT';
+          reject(error);
+        }, remaining);
+
+        link.once('ready', () => {
+          clearTimeout(handshake);
+          resolve(link);
+        });
+        link.once('failed', (reason) => {
+          clearTimeout(handshake);
+          const error = new Error(reason);
+          error.code = 'EHANDSHAKE';
+          reject(error);
+        });
+      });
+    };
+
+    attempt();
+  });
+}
+
+module.exports = { Link, listen, dial, overStream, simultaneousOpen };

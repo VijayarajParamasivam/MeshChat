@@ -261,7 +261,7 @@ function discoverGateways(timeout = 2500) {
  * Pull the device description and find the control URL of whichever WAN
  * connection service this router exposes.
  */
-async function readControlUrl(location) {
+async function readControlUrl(location, services = WAN_SERVICES) {
   const url = new URL(location);
   const res = await request({
     method: 'GET',
@@ -275,7 +275,7 @@ async function readControlUrl(location) {
   // Good enough XML handling for a document with this rigid a shape.
   const blocks = res.body.match(/<service>[\s\S]*?<\/service>/gi) || [];
 
-  for (const service of WAN_SERVICES) {
+  for (const service of services) {
     for (const block of blocks) {
       if (!block.includes(service)) continue;
       const control = block.match(/<controlURL>([\s\S]*?)<\/controlURL>/i);
@@ -479,8 +479,18 @@ async function open(port, { onLog = () => {} } = {}) {
   // a global IPv6 address is dialable as-is, with no router negotiation at all.
   const kinds = classifyIPv6();
   const ip6 = orderIPv6Stable(kinds.global);
+  let pinhole = { ok: false, method: null, note: null };
+
   if (ip6.length) {
     onLog(`portal: public IPv6 found (${ip6[0]}) — no NAT to get around`);
+    // Having the address is not the same as being reachable at it: nearly every
+    // router firewalls inbound IPv6 by default. Ask it not to. Deliberately not
+    // fatal — punching and a manual firewall rule both still work without it.
+    try {
+      pinhole = await require('./pinhole').open(port, ip6[0], { onLog });
+    } catch (err) {
+      onLog(`pinhole: failed outright (${err.message})`);
+    }
   } else if (kinds.linkLocal.length || kinds.uniqueLocal.length) {
     onLog('portal: IPv6 exists here but none of it is internet-routable');
   }
@@ -541,6 +551,9 @@ async function open(port, { onLog = () => {} } = {}) {
     ip6LinkLocal: kinds.linkLocal,
     ip6UniqueLocal: kinds.uniqueLocal,
     ip6Reachable: ip6.length > 0,
+    ip6Pinhole: pinhole.ok,
+    ip6PinholeMethod: pinhole.method,
+    ip6PinholeNote: pinhole.note,
     ipv4Reachable,
     lanIp,
     lanPort: port,
@@ -559,6 +572,13 @@ async function open(port, { onLog = () => {} } = {}) {
       tryUpnp(mapped, active.lanIp).catch(() => {});
     } else if (active.method === 'natpmp') {
       tryNatpmp(mapped, active.gateway).catch(() => {});
+    }
+    // Pinholes carry their own lease and expire just as port mappings do. The
+    // address may also have rotated since we opened it, so re-read it rather
+    // than renewing one that no longer belongs to us.
+    if (active.ip6Pinhole) {
+      const current = orderIPv6Stable(classifyIPv6().global)[0];
+      if (current) require('./pinhole').open(mapped, current).catch(() => {});
     }
   }, (LEASE_SECONDS / 2) * 1000);
 
@@ -594,4 +614,12 @@ module.exports = {
   isGlobalIPv6,
   globalIPv6Addresses,
   classifyIPv6,
+  // Shared with pinhole.js, which asks the same router for the IPv6 equivalent
+  // of what this file asks for over IPv4.
+  discoverGateways,
+  readControlUrl,
+  soap,
+  NATPMP_PORT,
+  LEASE_SECONDS,
+  DESCRIPTION,
 };

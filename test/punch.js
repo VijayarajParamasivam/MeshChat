@@ -78,12 +78,12 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   check('zone index is stripped', punch.normaliseHost('fe80::1%7') === 'fe80::1');
   check(
     'keys match regardless of ipv4 form',
-    punch.keyFor('10.0.0.5', 1) === punch.keyFor('::ffff:10.0.0.5', 1)
+    punch.keyFor('10.0.0.5', 1, 9) === punch.keyFor('::ffff:10.0.0.5', 1, 9)
   );
 
   // --- the punch itself ---------------------------------------------------
-  const hubA = await new punch.Hub(PORT_A).start();
-  const hubB = await new punch.Hub(PORT_B).start();
+  const hubA = await new punch.Hub(PORT_A, []).start();
+  const hubB = await new punch.Hub(PORT_B, []).start();
 
   // Each side receives whatever the other punches through unprompted.
   const inboundB = new Promise((resolve) => hubB.once('session', resolve));
@@ -131,7 +131,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   // it still delivers them in sequence. This is the case UDP creates and TCP
   // never does, so it is worth driving directly rather than hoping loopback
   // produces it.
-  const solo = new punch.UdpStream(hubA, '::1', 59999);
+  const solo = new punch.UdpStream(hubA, '::1', 59999, PORT_A);
   const readSolo = collect(solo);
   const frame = (seq, text) => {
     const body = Buffer.alloc(4 + text.length);
@@ -155,8 +155,8 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const alice = makePeer('alice');
   const bob = makePeer('bob');
 
-  const hubC = await new punch.Hub(47913).start();
-  const hubD = await new punch.Hub(47914).start();
+  const hubC = await new punch.Hub(47913, []).start();
+  const hubD = await new punch.Hub(47914, []).start();
 
   const inboundD = new Promise((resolve) => hubD.once('session', resolve));
   const [cStream, dStream] = await Promise.all([
@@ -180,8 +180,8 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // Dialling someone who is not who we expected must still be refused, exactly
   // as over TCP — the transport changing must not weaken the identity check.
-  const hubE = await new punch.Hub(47915).start();
-  const hubF = await new punch.Hub(47916).start();
+  const hubE = await new punch.Hub(47915, []).start();
+  const hubF = await new punch.Hub(47916, []).start();
   const inboundF = new Promise((resolve) => hubF.once('session', resolve));
   const [eStream, fStream] = await Promise.all([
     hubE.punch('::1', 47916, { aligned: false }),
@@ -197,9 +197,47 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
   check('a peer with the wrong identity is rejected', await rejected);
 
+  // --- alternate ports ----------------------------------------------------
+  //
+  // Reciprocal alt-port punching cannot be driven on one machine — both hubs
+  // would need to bind the same borrowed port — so what is checked here is the
+  // bookkeeping around it, which is where the bugs would be.
+  const hubG = await new punch.Hub(47917, [47918, 47919]).start();
+  check('alternate ports are bound alongside the main one', hubG.ports().join() === '47917,47918,47919');
+  check('the app port always leads', hubG.ports()[0] === 47917);
+
+  // A borrowed port that is already taken must be skipped, not fatal — 443 and
+  // 53 are frequently unavailable, and losing one is not losing punching.
+  const squatter = await new punch.Hub(47921, []).start();
+  const hubH = await new punch.Hub(47922, [47921, 47923]).start();
+  check('an unavailable alternate port is skipped', !hubH.ports().includes(47921));
+  check('the rest still bind', hubH.ports().join() === '47922,47923');
+
+  let refused = false;
+  try {
+    await hubH.punch('::1', 47999, { aligned: false, fromPort: 47921 });
+  } catch (err) {
+    refused = err.code === 'EPUNCHFAIL';
+  }
+  check('punching from an unbound port is refused', refused);
+
+  // Two flows to the same peer from different local ports are different holes,
+  // so they must not collide in the session table.
+  check(
+    'local port distinguishes otherwise identical flows',
+    punch.keyFor('::1', 47777, 47777) !== punch.keyFor('::1', 47777, 443)
+  );
+
+  // Warming is per-flow too, and must ignore ports we never managed to bind.
+  hubH.keepWarm('::1', 47950, 47922);
+  hubH.keepWarm('::1', 47950, 47921); // not bound — must be dropped
+  check('warming only tracks ports we actually hold', hubH.warm.size === 1);
+  hubH.cool('::1', 47950, 47922);
+  check('cooling clears the warm set', hubH.warm.size === 0);
+
   linkA.close();
   linkB.close();
-  for (const hub of [hubA, hubB, hubC, hubD, hubE, hubF]) hub.stop();
+  for (const hub of [hubA, hubB, hubC, hubD, hubE, hubF, hubG, hubH, squatter]) hub.stop();
 
   console.log(failures ? `\n${failures} failing` : '\nall good');
   process.exit(failures ? 1 : 0);

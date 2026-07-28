@@ -72,6 +72,11 @@ async function main() {
     process.exit(1);
   }
 
+  say(`  trying ports        ${hub.ports().join(', ')}`);
+  say('  443 and 53 are borrowed because carriers that filter high ports often');
+  say('  pass them. All are tried at once, so one round covers every avenue.');
+  say('');
+
   let round = 0;
 
   const attempt = async () => {
@@ -79,8 +84,18 @@ async function main() {
     const wait = punch.msUntilWindow();
     say(`  round ${round}: next window in ${(wait / 1000).toFixed(1)}s — both ends fire together`);
 
+    // Every port in parallel: they use separate sockets and each waits on the
+    // same shared window, so running them in sequence would waste a window each.
+    const races = hub.ports().map((fromPort) => {
+      const toPort = fromPort === PORT ? PORT : fromPort;
+      return hub
+        .punch(peer, toPort, { fromPort })
+        .then((stream) => ({ stream, fromPort }));
+    });
+
     try {
-      const stream = await hub.punch(peer, PORT);
+      const { stream, fromPort } = await Promise.any(races);
+      say(`  got through on port ${fromPort}`);
 
       say('');
       say('  ✓ PACKETS CROSSED. Hole punching works on this network.');
@@ -113,15 +128,19 @@ async function main() {
       });
 
       return;
-    } catch (err) {
-      say(`  round ${round}: no reply (${err.code || 'failed'})`);
+    } catch {
+      // Promise.any only rejects once every port has failed.
+      say(`  round ${round}: nothing crossed on any of ${hub.ports().join(', ')}`);
 
       if (round === 3) {
         say('');
-        say('  three windows with nothing crossing. Either the other end is not');
-        say('  running yet, or this network drops reciprocal UDP. If you are on a');
-        say('  mobile hotspot, that is the likely answer and no client-side change');
+        say('  three windows, every port, nothing through. Either the other end is');
+        say('  not running, or this network drops reciprocal UDP wholesale. On a');
+        say('  mobile hotspot that is the likely answer, and no client-side change');
         say('  will help — one end needs a connection that accepts inbound.');
+        say('');
+        say('  Next thing to try is the app itself: /punch also falls back to TCP,');
+        say('  which some carriers pass while filtering UDP.');
         say('');
       }
 

@@ -57,7 +57,25 @@ just choosing to drop them. Windows blocks unsolicited inbound by default, harde
 of all on the "Public" profile that most WiFi gets classified as.
 
 Run `/firewall` and accept the prompt. That's the whole fix — for *your* firewall.
-Somebody else's is another matter.
+Your router's, and your carrier's, are other matters.
+
+### Asking the router to allow inbound IPv6
+
+Your router almost certainly firewalls inbound IPv6 by default, even though there
+is no NAT and the address is genuinely yours. Two standard protocols exist for
+asking it to stop, and MeshChat tries both on startup:
+
+- **UPnP IGDv2 `AddPinhole`**, the IPv6 counterpart of the port-forward request
+  already used for IPv4, found on the same device by the same SSDP search.
+- **PCP (RFC 6887)**, NAT-PMP's successor, which unlike NAT-PMP was designed for
+  IPv6 firewalls. Same UDP port 5351.
+
+Both talk only to the gateway on your own network, so this keeps the promise the
+rest of the project makes. `/net` reports whether a pinhole was granted.
+
+A phone hotspot has no router to ask, and a carrier's firewall is far upstream of
+anything that would answer — so this fixes the fixable end. That is usually
+enough, because only one of two peers has to accept inbound for both to talk.
 
 ### When neither of you can be dialled
 
@@ -91,8 +109,30 @@ be sending at roughly the same moment. With nothing to coordinate through, they
 align on the wall clock instead, firing on a fixed 30-second boundary since the
 epoch. Clocks within a few seconds of each other land in the same window.
 
+That alignment is only needed for first contact. Once someone is a friend, one
+small datagram goes out to them every 20 seconds whether they are online or not,
+which holds your side of the hole permanently open — so whoever starts second is
+let straight through with no coordination at all. Capped at 16 friends so a long
+list can't become a steady drain on a metered connection.
+
 Run `/punch <friend>` on both machines. It also happens automatically whenever an
 ordinary dial fails and the friend has an IPv6 address.
+
+Three things are tried before giving up, because carriers differ in *how* they
+filter rather than just whether they do:
+
+1. **UDP on the app's port**, the main path.
+2. **UDP on 443 and 53**, borrowed because they carry QUIC and DNS. Blocking
+   those breaks the web, so they often survive filtering that kills a high random
+   port. Both ends derive the same list, so nothing extra goes in the card.
+3. **TCP simultaneous open**, for carriers that pass TCP but filter UDP. Two
+   sockets both in `SYN_SENT` toward each other complete the handshake between
+   themselves with no listening socket anywhere — the one TCP transition that
+   needs no server. It uses a port of its own because Windows won't let an
+   outbound socket bind a port a listener already holds.
+
+All the UDP ports are tried in parallel, since each would otherwise wait out its
+own window.
 
 This is UDP, not TCP. The technique works for both, but carriers treat a bare SYN
 from an unexpected direction far more harshly than a datagram. The cost is that
@@ -109,10 +149,12 @@ npm run punch-test -- <their-ipv6-address>
 ```
 
 That uses only the punch layer — no keys, no friend list — so if it fails, the
-network refused the technique rather than something breaking higher up. If it
-does fail, one end genuinely needs a connection that accepts inbound: wired
-broadband with an IPv6 pinhole open for TCP and UDP 47777. Only one, though —
-once either side is reachable, the other can always dial out to it.
+network refused the technique rather than something breaking higher up. It tries
+every borrowed port at once and tells you which one got through.
+
+If it does fail on all of them, one end genuinely needs a connection that accepts
+inbound: wired broadband with an IPv6 pinhole open for TCP and UDP 47777. Only
+one, though — once either side is reachable, the other can always dial out to it.
 
 ## Using it
 
@@ -261,6 +303,7 @@ electron/preload.js    the only bridge to the UI
 src/core/crypto.js     signing, key agreement, sealed frames
 src/core/identity.js   key generation, Mesh ID derivation
 src/core/portal.js     IPv6 discovery, UPnP + NAT-PMP port mapping
+src/core/pinhole.js    IPv6 firewall pinholes over UPnP IGDv2 and PCP
 src/core/punch.js      UDP hole punching and its reliability layer
 src/core/firewall.js   Windows inbound allow rule
 src/core/card.js       signed contact codes

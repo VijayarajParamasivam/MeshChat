@@ -319,6 +319,14 @@ async function runCommand(raw) {
         sys(`ipv6         ${addr(net.ip6[0], net.port)}`);
         for (const extra of net.ip6.slice(1)) line(`             ${addr(extra, net.port)}`, 'sys');
         line('             public and routable — nothing is translating it', 'sys');
+        // Having the address is only half of it; the router still has to be
+        // willing to let strangers in on it.
+        if (net.ip6Pinhole) {
+          line(`             router is allowing inbound (${net.ip6PinholeMethod})`, 'sys');
+        } else {
+          line('             but the router was not willing to open a pinhole,', 'sys');
+          line('             so inbound may still be dropped. /punch works around it.', 'sys');
+        }
       } else {
         sys('ipv6         none that the internet can reach');
         // ipconfig shows these on every machine alive, so spell out why they

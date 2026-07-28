@@ -30,6 +30,14 @@ const NEARBY_TTL_MS = 30000;
 const DIAL_TIMEOUT_MS = 6000;
 const DIAL_STAGGER_MS = 400;
 const CARD_REFRESH_MS = 60000;
+const MAX_WARM_PEERS = 16;
+
+/**
+ * Offset for the listener-free port TCP simultaneous open uses. Chosen to clear
+ * both the multi-instance range (BASE_PORT..+9) and the discovery port, so it is
+ * derivable from the app port without anything extra in the contact card.
+ */
+const TCP_PUNCH_OFFSET = 100;
 
 /**
  * Which protocol a socket ended up using. A dual-stack listener reports IPv4
@@ -81,7 +89,7 @@ function explainDialFailure(endpoint, error) {
  * outright — which is the point at which no client-side change can help.
  */
 function explainPunchFailure(endpoint, error) {
-  const where = `punch ${formatEndpoint(endpoint)}`;
+  const where = `punch ${endpoint.type === 'tcp' ? 'tcp ' : ''}${formatEndpoint(endpoint)}`;
 
   switch (error.code) {
     case 'EPUNCHFAIL':
@@ -209,6 +217,41 @@ class Mesh extends EventEmitter {
     }
   }
 
+  /**
+   * Decide whose pinholes to hold open.
+   *
+   * Only friends with an IPv6 address, since that is the only kind punching can
+   * work for, and only those we aren't already connected to. Capped so a large
+   * friend list can't turn into a steady stream of background traffic on a
+   * metered mobile connection.
+   */
+  _updateWarmSet() {
+    if (!this.hub) return;
+
+    this.hub.coolAll();
+
+    let warmed = 0;
+    for (const friend of this.friends.values()) {
+      if (warmed >= MAX_WARM_PEERS) break;
+      if (this.links.has(friend.id)) continue;
+
+      for (const endpoint of friend.endpoints || []) {
+        if (endpoint.type !== 'ip6' || this._isSelf(endpoint)) continue;
+        // Warm every port we can punch from — there is no way to know in advance
+        // which one their carrier will let through.
+        for (const fromPort of this.hub.ports()) {
+          this.hub.keepWarm(
+            endpoint.host,
+            fromPort === this.port ? endpoint.port : fromPort,
+            fromPort
+          );
+        }
+        warmed += 1;
+        break; // one address per friend is enough to keep a path open
+      }
+    }
+  }
+
   /** A peer punched through to us before we managed to reach them. */
   async _onPunchedIn(stream) {
     try {
@@ -250,13 +293,60 @@ class Mesh extends EventEmitter {
           );
         }
 
+        // Every port at once, not one after another. Each waits for the same
+        // shared window, so running them in sequence would spend a fresh window
+        // on each and stretch one attempt into minutes. They use separate
+        // sockets and cannot interfere.
+        const attempts = this.hub.ports().map(async (fromPort) => {
+          const toPort = fromPort === this.port ? endpoint.port : fromPort;
+          const via = fromPort === this.port ? endpoint : { ...endpoint, port: toPort };
+
+          try {
+            const stream = await this.hub.punch(endpoint.host, toPort, { aligned, fromPort });
+            return await transport.overStream(stream, this._context(), friend.id);
+          } catch (err) {
+            throw Object.assign(err, { via });
+          }
+        });
+
+        const settled = await Promise.allSettled(attempts);
+        const won = settled.find((r) => r.status === 'fulfilled');
+
+        if (won) {
+          // Any slower port that also got through is redundant once one link is
+          // adopted; drop the extras rather than leaving them running.
+          for (const other of settled) {
+            if (other.status === 'fulfilled' && other.value !== won.value) other.value.close();
+          }
+          this._adopt(won.value);
+          return { ok: true, reasons: [] };
+        }
+
+        for (const failed of settled) {
+          reasons.push(explainPunchFailure(failed.reason.via || endpoint, failed.reason));
+        }
+
+        // UDP got nowhere. Some carriers filter it while passing TCP, so the
+        // same trick is worth one attempt over the other protocol before
+        // concluding the network refuses the technique altogether.
         try {
-          const stream = await this.hub.punch(endpoint.host, endpoint.port, { aligned });
-          const link = await transport.overStream(stream, this._context(), friend.id);
+          if (verbose) this.log(`  udp failed — retrying over tcp ${endpoint.port + TCP_PUNCH_OFFSET}`);
+          const link = await transport.simultaneousOpen(
+            endpoint.host,
+            endpoint.port + TCP_PUNCH_OFFSET,
+            this.port + TCP_PUNCH_OFFSET,
+            this._context(),
+            friend.id
+          );
           this._adopt(link);
           return { ok: true, reasons: [] };
         } catch (err) {
-          reasons.push(explainPunchFailure(endpoint, err));
+          reasons.push(
+            explainPunchFailure(
+              { ...endpoint, type: 'tcp', port: endpoint.port + TCP_PUNCH_OFFSET },
+              err
+            )
+          );
         }
       }
       return { ok: false, reasons };
@@ -708,6 +798,11 @@ class Mesh extends EventEmitter {
   }
 
   _redialAll() {
+    // Recomputed on every sweep rather than tracked incrementally: the inputs
+    // (friend list, live links, rotating addresses) all move on their own, and
+    // rebuilding a set this small is cheaper than keeping it correct by hand.
+    this._updateWarmSet();
+
     const now = Date.now();
     for (const friend of this.friends.values()) {
       if (this.links.has(friend.id) || this.dialing.has(friend.id)) continue;

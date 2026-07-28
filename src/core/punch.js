@@ -83,6 +83,29 @@ const PUNCH_WINDOW_MS = 10000;
  */
 const PUNCH_PERIOD_MS = 30000;
 
+/**
+ * How often a "warm" peer gets a lone datagram to hold its pinhole open.
+ *
+ * Comfortably inside the shortest firewall UDP timeout worth worrying about
+ * (conntrack commonly expires unanswered UDP flows at 30s).
+ */
+const WARM_INTERVAL_MS = 20000;
+
+/**
+ * Ports to try alongside the app's own, for carriers that filter by port rather
+ * than wholesale.
+ *
+ * 443 is QUIC and 53 is DNS. Both carry so much ordinary traffic that blocking
+ * them breaks the web, so they tend to survive filtering that kills a high
+ * random port. Neither side needs to advertise these: both derive the same list,
+ * bind the same ports, and send from each to the same one on the other end, so
+ * reciprocity holds without anything extra in the contact card.
+ *
+ * Binding them is best-effort. They are privileged on Unix and often already
+ * taken, and failing to get one simply means that avenue isn't tried.
+ */
+const ALT_PORTS = [443, 53];
+
 /** Milliseconds until the next punch window opens. */
 function msUntilWindow(now = Date.now(), period = PUNCH_PERIOD_MS) {
   const into = now % period;
@@ -100,8 +123,17 @@ function normaliseHost(host) {
   return /^\d+\.\d+\.\d+\.\d+$/.test(bare) ? `::ffff:${bare}` : bare;
 }
 
-function keyFor(host, port) {
-  return `[${normaliseHost(host)}]:${port}`;
+/**
+ * Sessions are identified by the whole flow, not just the peer.
+ *
+ * Reciprocity means we always send from the port we receive on, but the peer's
+ * port need not match ours — a second instance listens on the next port up, and
+ * the alternate-port attempts use ports of their own. Two flows to the same peer
+ * from different local ports are genuinely different holes, so the local port
+ * belongs in the key.
+ */
+function keyFor(host, port, localPort) {
+  return `${localPort}|[${normaliseHost(host)}]:${port}`;
 }
 
 /**
@@ -112,11 +144,12 @@ function keyFor(host, port) {
  * swapped underneath them without a line changing.
  */
 class UdpStream extends EventEmitter {
-  constructor(hub, host, port) {
+  constructor(hub, host, port, localPort) {
     super();
     this.hub = hub;
     this.host = normaliseHost(host);
     this.port = port;
+    this.localPort = localPort;
     this.destroyed = false;
 
     // Outbound reliability.
@@ -162,7 +195,7 @@ class UdpStream extends EventEmitter {
     while (this.queue.length && this.unacked.size < SEND_WINDOW) {
       const chunk = this.queue.shift();
       this.unacked.set(chunk.seq, { buf: chunk.buf, sentAt: Date.now(), tries: 1 });
-      this.hub._send(chunk.buf, this.host, this.port);
+      this.hub._send(chunk.buf, this.host, this.port, this.localPort);
     }
   }
 
@@ -176,7 +209,7 @@ class UdpStream extends EventEmitter {
     }
 
     if (now - this.lastHeard > KEEPALIVE_MS && !this.unacked.size) {
-      this.hub._send(Buffer.from([PUNCH]), this.host, this.port);
+      this.hub._send(Buffer.from([PUNCH]), this.host, this.port, this.localPort);
     }
 
     for (const [seq, entry] of this.unacked) {
@@ -188,7 +221,7 @@ class UdpStream extends EventEmitter {
 
       entry.tries += 1;
       entry.sentAt = now;
-      this.hub._send(entry.buf, this.host, this.port);
+      this.hub._send(entry.buf, this.host, this.port, this.localPort);
     }
   }
 
@@ -232,7 +265,7 @@ class UdpStream extends EventEmitter {
     const ack = Buffer.alloc(5);
     ack.writeUInt8(ACK, 0);
     ack.writeUInt32BE(this.expected - 1, 1);
-    this.hub._send(ack, this.host, this.port);
+    this.hub._send(ack, this.host, this.port, this.localPort);
   }
 
   _error(reason) {
@@ -248,8 +281,8 @@ class UdpStream extends EventEmitter {
     this.destroyed = true;
     clearInterval(this.timer);
 
-    this.hub._send(Buffer.from([CLOSE]), this.host, this.port);
-    this.hub._drop(keyFor(this.host, this.port));
+    this.hub._send(Buffer.from([CLOSE]), this.host, this.port, this.localPort);
+    this.hub._drop(keyFor(this.host, this.port, this.localPort));
 
     this.emit('close');
     this.removeAllListeners();
@@ -264,53 +297,153 @@ class UdpStream extends EventEmitter {
  * has to serve both punching and carrying traffic for every peer at once.
  */
 class Hub extends EventEmitter {
-  constructor(port) {
+  constructor(port, altPorts = ALT_PORTS) {
     super();
     this.port = port;
-    this.socket = null;
+    // One socket per port we punch from. Because both ends send from a port to
+    // the same port number on the other, the peer's port tells us which of our
+    // sockets a datagram belongs to — no extra bookkeeping needed.
+    this.sockets = new Map(); // local port -> dgram socket
+    this.altPorts = altPorts.filter((p) => p !== port);
     this.sessions = new Map(); // key -> UdpStream
     this.punches = new Map(); // key -> { timer, deadline, resolve, reject, done }
+    this.warm = new Map(); // key -> { host, port }
+    this.warmTimer = null;
   }
 
-  start() {
+  /**
+   * Hold a pinhole open toward a peer indefinitely.
+   *
+   * Windowed punching demands that both people be at their machines in the same
+   * thirty seconds, which is a lot to ask. Sending one datagram every twenty
+   * seconds instead means our side of the hole is *always* open, so whoever
+   * comes online second is let straight through with no coordination at all.
+   * The alignment machinery stays for first contact, when neither side has any
+   * reason to have been warming the other.
+   *
+   * One small datagram per peer per twenty seconds — cheap enough to leave
+   * running, which is the only reason it can be relied on.
+   */
+  keepWarm(host, port, fromPort = this.port) {
+    if (!this.sockets.has(fromPort)) return;
+    this.warm.set(keyFor(host, port, fromPort), { host, port, fromPort });
+
+    if (!this.warmTimer) {
+      this.warmTimer = setInterval(() => this._warmTick(), WARM_INTERVAL_MS);
+      if (this.warmTimer.unref) this.warmTimer.unref();
+    }
+  }
+
+  /** Stop holding a hole open — the peer is connected, or no longer a friend. */
+  cool(host, port, fromPort = this.port) {
+    this.warm.delete(keyFor(host, port, fromPort));
+    if (!this.warm.size && this.warmTimer) {
+      clearInterval(this.warmTimer);
+      this.warmTimer = null;
+    }
+  }
+
+  /** Forget every warm target, then let the caller re-add the current set. */
+  coolAll() {
+    this.warm.clear();
+    if (this.warmTimer) {
+      clearInterval(this.warmTimer);
+      this.warmTimer = null;
+    }
+  }
+
+  _warmTick() {
+    for (const [key, target] of this.warm) {
+      // A live session already keeps its own path open; sending more would be
+      // pure noise.
+      if (this.sessions.has(key)) continue;
+      this._send(Buffer.from([PUNCH]), target.host, target.port, target.fromPort);
+    }
+  }
+
+  /**
+   * Bind one port. udp6 without ipv6Only also accepts IPv4 peers as ::ffff:.
+   *
+   * `reuseAddr` only for our own port, where it buys a clean restart without
+   * waiting on the previous socket. The borrowed ports must NOT set it: on
+   * Windows two UDP sockets with SO_REUSEADDR can hold the same port and split
+   * the traffic between them, so we would quietly steal datagrams from whatever
+   * real QUIC or DNS service was already there. Without it the bind fails, which
+   * is exactly what we want — that port simply isn't ours to take.
+   */
+  _bind(port, { exclusive = false } = {}) {
     return new Promise((resolve, reject) => {
-      // udp6 without ipv6Only accepts IPv4 peers too, as ::ffff: addresses, so
-      // one socket covers the LAN fallback as well as the path we care about.
-      const socket = dgram.createSocket({ type: 'udp6', reuseAddr: true });
+      const socket = dgram.createSocket({ type: 'udp6', reuseAddr: !exclusive });
 
       socket.once('error', reject);
-      socket.on('message', (msg, rinfo) => this._onMessage(msg, rinfo));
+      socket.on('message', (msg, rinfo) => this._onMessage(msg, rinfo, port));
 
-      socket.bind(this.port, () => {
+      socket.bind(port, () => {
         socket.removeListener('error', reject);
-        socket.on('error', (err) => this.emit('log', `punch socket error: ${err.message}`));
-        this.socket = socket;
-        resolve(this);
+        socket.on('error', (err) => this.emit('log', `punch socket ${port}: ${err.message}`));
+        this.sockets.set(port, socket);
+        resolve(socket);
       });
     });
   }
 
+  async start() {
+    // The app's own port has to work; without it there is no punching at all.
+    await this._bind(this.port);
+
+    for (const port of this.altPorts) {
+      try {
+        await this._bind(port, { exclusive: true });
+      } catch {
+        // Privileged, taken, or otherwise unavailable. Nothing is lost beyond
+        // that one extra avenue, so it is not worth reporting as an error.
+      }
+    }
+
+    const extra = this.altPorts.filter((p) => this.sockets.has(p));
+    if (extra.length) {
+      this.emit('log', `punch: also listening on ${extra.join(', ')} for filtered networks`);
+    }
+
+    return this;
+  }
+
+  /** Every port we can punch from, the app's own first. */
+  ports() {
+    return [this.port, ...this.altPorts.filter((p) => this.sockets.has(p))];
+  }
+
   stop() {
+    this.coolAll();
+
     for (const attempt of this.punches.values()) this._settlePunch(attempt, null);
     this.punches.clear();
 
     for (const session of [...this.sessions.values()]) session.destroy();
     this.sessions.clear();
 
-    if (this.socket) {
+    for (const socket of this.sockets.values()) {
       try {
-        this.socket.close();
+        socket.close();
       } catch {
         /* already closed */
       }
-      this.socket = null;
     }
+    this.sockets.clear();
   }
 
-  _send(buf, host, port) {
-    if (!this.socket) return;
+  /**
+   * The local port is explicit rather than inferred from the peer's, because the
+   * two are not always equal: a second instance listens one port up, and only
+   * the alternate-port attempts have both ends on the same number. What must
+   * always hold is that we send from the port we receive on — that is what makes
+   * our outbound flow the mirror of the peer's, and it is the whole mechanism.
+   */
+  _send(buf, host, port, localPort) {
+    const socket = this.sockets.get(localPort);
+    if (!socket) return;
     try {
-      this.socket.send(buf, port, normaliseHost(host));
+      socket.send(buf, port, normaliseHost(host));
     } catch {
       /* a dead socket surfaces through the idle timeout instead */
     }
@@ -320,18 +453,18 @@ class Hub extends EventEmitter {
     this.sessions.delete(key);
   }
 
-  _onMessage(msg, rinfo) {
+  _onMessage(msg, rinfo, localPort) {
     if (!msg.length) return;
 
-    const key = keyFor(rinfo.address, rinfo.port);
+    const key = keyFor(rinfo.address, rinfo.port, localPort);
     const type = msg.readUInt8(0);
     const body = msg.subarray(1);
 
     // A punch from them proves their packets reach us. Answering proves ours
     // reach them, which is the half they cannot establish on their own.
     if (type === PUNCH) {
-      this._send(Buffer.from([PUNCH_ACK]), rinfo.address, rinfo.port);
-      this._open(key, rinfo.address, rinfo.port);
+      this._send(Buffer.from([PUNCH_ACK]), rinfo.address, rinfo.port, localPort);
+      this._open(key, rinfo.address, rinfo.port, localPort);
       return;
     }
 
@@ -339,7 +472,7 @@ class Hub extends EventEmitter {
     // once: it could only exist if our punch arrived, and it only reached us if
     // theirs can too.
     if (type === PUNCH_ACK) {
-      this._open(key, rinfo.address, rinfo.port);
+      this._open(key, rinfo.address, rinfo.port, localPort);
       return;
     }
 
@@ -347,7 +480,7 @@ class Hub extends EventEmitter {
     if (!session) {
       // Data for a session we have torn down. Tell them so they stop resending
       // rather than retrying into a void.
-      if (type !== CLOSE) this._send(Buffer.from([CLOSE]), rinfo.address, rinfo.port);
+      if (type !== CLOSE) this._send(Buffer.from([CLOSE]), rinfo.address, rinfo.port, localPort);
       return;
     }
 
@@ -358,7 +491,7 @@ class Hub extends EventEmitter {
    * Promote a peer we have proven two-way contact with into a live session.
    * Safe to call repeatedly — punches keep arriving after the first one lands.
    */
-  _open(key, host, port) {
+  _open(key, host, port, localPort) {
     const existing = this.sessions.get(key);
     const attempt = this.punches.get(key);
 
@@ -369,7 +502,7 @@ class Hub extends EventEmitter {
 
     if (this.sessions.size >= MAX_SESSIONS) return null;
 
-    const session = new UdpStream(this, host, port);
+    const session = new UdpStream(this, host, port, localPort);
     this.sessions.set(key, session);
 
     // A punch we started resolves through its promise; one that arrived out of
@@ -404,8 +537,14 @@ class Hub extends EventEmitter {
    * something else already told us the peer is live right now, such as a LAN
    * beacon, or when a human asked for an attempt and is waiting on it.
    */
-  punch(host, port, { aligned = true, windowMs = PUNCH_WINDOW_MS } = {}) {
-    const key = keyFor(host, port);
+  punch(host, port, { aligned = true, windowMs = PUNCH_WINDOW_MS, fromPort = this.port } = {}) {
+    const key = keyFor(host, port, fromPort);
+
+    if (!this.sockets.has(fromPort)) {
+      const error = new Error(`no socket bound on ${fromPort}`);
+      error.code = 'EPUNCHFAIL';
+      return Promise.reject(error);
+    }
 
     const existing = this.sessions.get(key);
     if (existing && !existing.destroyed) return Promise.resolve(existing);
@@ -422,7 +561,7 @@ class Hub extends EventEmitter {
     const begin = () => {
       if (attempt.done) return;
 
-      const fire = () => this._send(Buffer.from([PUNCH]), host, port);
+      const fire = () => this._send(Buffer.from([PUNCH]), host, port, fromPort);
       fire();
       attempt.timer = setInterval(fire, PUNCH_INTERVAL_MS);
       attempt.deadline = setTimeout(() => this._settlePunch(attempt, null), windowMs);
@@ -450,6 +589,7 @@ module.exports = {
   keyFor,
   PUNCH_PERIOD_MS,
   PUNCH_WINDOW_MS,
+  WARM_INTERVAL_MS,
   MAX_PAYLOAD,
   types: { PUNCH, PUNCH_ACK, DATA, ACK, CLOSE },
 };
