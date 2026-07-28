@@ -89,11 +89,13 @@ function explainDialFailure(endpoint, error) {
  * outright — which is the point at which no client-side change can help.
  */
 function explainPunchFailure(endpoint, error) {
-  const where = `punch ${endpoint.type === 'tcp' ? 'tcp ' : ''}${formatEndpoint(endpoint)}`;
+  const tcp = endpoint.type === 'tcp';
+  const where = `punch ${tcp ? 'tcp ' : ''}${formatEndpoint(endpoint)}`;
+  const protocol = tcp ? 'tcp' : 'udp';
 
   switch (error.code) {
     case 'EPUNCHFAIL':
-      return `${where} — nothing crossed. either they were not running, or one of the two networks drops reciprocal udp.`;
+      return `${where} — nothing crossed. either they were not running at the same time, or one of the two networks drops reciprocal ${protocol}.`;
     case 'EPUNCHLOST':
       return `${where} — the path opened then died: ${error.message}`;
     case 'ETIMEDOUT':

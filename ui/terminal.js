@@ -358,10 +358,20 @@ async function runCommand(raw) {
 
       line('');
       const openable = !fw.supported || fw.installed;
-      if (net.reachable && openable) {
-        line('  friends can dial you directly right now.', 'hot');
-      } else if (net.reachable) {
+      // A global IPv6 address is not the same as being reachable at it. Saying
+      // "friends can dial you" on the strength of the address alone contradicts
+      // the pinhole warning printed a few lines above, and it is exactly the
+      // conflation that sends people hunting for a fault on a healthy machine.
+      const confirmed = net.ipv4Reachable || (net.ip6?.length && net.ip6Pinhole);
+
+      if (!openable) {
         line('  you have a direct path, but the firewall is shut. run /firewall.', 'err');
+      } else if (confirmed) {
+        line('  friends can dial you directly right now.', 'hot');
+      } else if (net.ip6?.length) {
+        line('  you have a public address, but nothing has confirmed inbound', 'sys');
+        line('  actually reaches it — your router or carrier may still drop it.', 'sys');
+        line('  run /try <friend> to find out which. /punch works around it.', 'sys');
       } else {
         line('  no public address here, so only same-WiFi chat works.', 'err');
         line(`  ${net.ipv4Note || ''}`, 'sys');
