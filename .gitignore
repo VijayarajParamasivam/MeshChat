@@ -17,3 +17,6 @@ Thumbs.db
 .env.*
 .vscode/
 .idea/
+
+# Tor binary fetched by postinstall, not committed
+vendor/

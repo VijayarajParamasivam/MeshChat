@@ -39,7 +39,14 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 
-const BOOTSTRAP_TIMEOUT_MS = 120000;
+/**
+ * A first bootstrap downloads the full network consensus and relay descriptors,
+ * which is megabytes. Two minutes is ample on a wired line and nowhere near
+ * enough on a congested mobile connection — measured at over 120s here on a
+ * phone hotspot, which is exactly the network this feature exists for. Progress
+ * is logged throughout, so a long wait looks like progress rather than a hang.
+ */
+const BOOTSTRAP_TIMEOUT_MS = 300000;
 const CONTROL_TIMEOUT_MS = 20000;
 
 /** Tor is slow. Circuits take seconds to build; onion rendezvous takes longer. */
@@ -74,6 +81,10 @@ function candidatePaths() {
   const list = [];
 
   if (process.env.MESHCHAT_TOR) list.push(process.env.MESHCHAT_TOR);
+
+  // What `npm install` fetched. First choice, so a clean clone works with no
+  // setup and without depending on whatever Tor the machine happens to have.
+  list.push(path.join(__dirname, '..', '..', 'vendor', 'tor', 'tor', exe));
 
   if (process.platform === 'win32') {
     const roots = [
@@ -264,8 +275,9 @@ function socksConnect(socksPort, host, port, timeoutMs = DIAL_TIMEOUT_MS) {
  * made them, which is precisely what we want: quitting MeshChat should take the
  * service down rather than leave it advertised and unanswered.
  */
-class Control {
+class Control extends EventEmitter {
   constructor(port) {
+    super();
     this.port = port;
     this.socket = null;
     this.buffer = '';
@@ -303,10 +315,20 @@ class Control {
       const [full, body, status, tail] = match;
       this.buffer = this.buffer.slice(full.length);
 
+      const lines = `${body}${status} ${tail}`.split(/\r?\n/).filter(Boolean);
+
+      // 650 is an asynchronous event, not an answer to anything. Letting it
+      // consume a waiting slot would resolve whichever command happened to be
+      // in flight with the text of an unrelated notification — and once the
+      // queue is off by one, every later reply belongs to the wrong caller.
+      if (status === '650') {
+        this.emit('event', lines);
+        continue;
+      }
+
       const pending = this.waiting.shift();
       if (!pending) continue;
 
-      const lines = `${body}${status} ${tail}`.split(/\r?\n/).filter(Boolean);
       if (status.startsWith('2')) pending.resolve(lines);
       else pending.reject(new Error(`tor control said: ${status} ${tail}`));
     }
@@ -424,6 +446,14 @@ class Tor extends EventEmitter {
     await this._awaitBootstrap();
     await this._openControl();
 
+    // Belt and braces alongside TAKEOWNERSHIP: an orphaned tor keeps an onion
+    // address published that nothing answers, which looks to a friend exactly
+    // like being ignored.
+    this._onExit = () => this.stop();
+    process.once('exit', this._onExit);
+    process.once('SIGINT', this._onExit);
+    process.once('SIGTERM', this._onExit);
+
     this.ready = true;
     return this;
   }
@@ -475,6 +505,20 @@ class Tor extends EventEmitter {
     this.control = new Control(this.controlPort);
     await this.control.connect();
     await this.control.send(`AUTHENTICATE ${cookie.toString('hex')}`);
+
+    // Tie tor's lifetime to this control connection. Without it a crash — or any
+    // exit that misses stop() — leaves tor running with the onion service still
+    // published, and on Windows nothing reaps it. TAKEOWNERSHIP makes tor shut
+    // itself down the moment the socket closes, however we die.
+    try {
+      await this.control.send('TAKEOWNERSHIP');
+      // Tor's own parent-process check would otherwise still apply and race the
+      // ownership we just took.
+      await this.control.send('RESETCONF __OwningControllerProcess');
+    } catch {
+      // Older tor without TAKEOWNERSHIP: fall back to killing it in stop(),
+      // which covers every orderly exit.
+    }
   }
 
   /**
@@ -506,9 +550,66 @@ class Tor extends EventEmitter {
 
     this.address = `${serviceId}.onion`;
     this.onionKey = key;
-    this.log(`tor: reachable at ${this.address}:${virtualPort}`);
 
-    return { address: this.address, key };
+    // ADD_ONION returns as soon as the service exists locally, but nobody can
+    // reach it until its descriptor has been uploaded to the directory hidden
+    // service directories. That takes tens of seconds, and announcing the
+    // address before then hands friends something that fails with "TTL
+    // expired" — measured here, and indistinguishable from being offline.
+    const published = await this._awaitDescriptor(serviceId);
+    this.published = published;
+
+    this.log(
+      published
+        ? `tor: reachable at ${this.address}:${virtualPort}`
+        : `tor: published ${this.address}:${virtualPort}, still propagating`
+    );
+
+    return { address: this.address, key, published };
+  }
+
+  /**
+   * Wait for tor to report the descriptor uploaded.
+   *
+   * Resolves false rather than throwing on timeout: the service usually becomes
+   * reachable shortly afterwards anyway, and refusing to start over a slow
+   * upload would be worse than starting with an honest caveat.
+   */
+  async _awaitDescriptor(serviceId, timeoutMs = 120000) {
+    try {
+      await this.control.send('SETEVENTS HS_DESC');
+    } catch {
+      return false;
+    }
+
+    const uploaded = await new Promise((resolve) => {
+      const timer = setTimeout(() => finish(false), timeoutMs);
+
+      const finish = (value) => {
+        clearTimeout(timer);
+        this.control.removeListener('event', onEvent);
+        resolve(value);
+      };
+
+      const onEvent = (lines) => {
+        for (const line of lines) {
+          if (/HS_DESC\s+UPLOADED\s/.test(line) && line.includes(serviceId)) {
+            return finish(true);
+          }
+        }
+      };
+
+      this.control.on('event', onEvent);
+      this.log('tor: waiting for the onion descriptor to publish...');
+    });
+
+    try {
+      await this.control.send('SETEVENTS');
+    } catch {
+      /* nothing further depends on unsubscribing */
+    }
+
+    return uploaded;
   }
 
   /** Open a connection to a peer's onion address. */
@@ -523,6 +624,14 @@ class Tor extends EventEmitter {
 
   stop() {
     this.ready = false;
+
+    if (this._onExit) {
+      process.removeListener('exit', this._onExit);
+      process.removeListener('SIGINT', this._onExit);
+      process.removeListener('SIGTERM', this._onExit);
+      this._onExit = null;
+    }
+
     this.control?.close();
     this.control = null;
 
