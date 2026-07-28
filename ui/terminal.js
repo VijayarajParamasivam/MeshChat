@@ -159,6 +159,7 @@ const HELP = [
   '',
   '  /net               connection diagnostics',
   '  /try <who>         force a connection attempt and show why it fails',
+  '  /punch <who>       hole-punch to a friend nobody can dial (both must be online)',
   '  /ipv6              why this machine has no IPv6, and how to fix it',
   '  /firewall          allow inbound connections (asks for admin)',
   '  /export            write an identity backup file',
@@ -385,6 +386,39 @@ async function runCommand(raw) {
         line('', 'sys');
         line('  if they have no ipv6 and you do, there is no shared path at all.', 'sys');
         line('  have them run /ipv6 on their machine.', 'sys');
+        line('  if you both have ipv6, try /punch — it works when neither side', 'sys');
+        line('  can be dialled, but you must both be online at the same moment.', 'sys');
+      }
+      line('');
+      return;
+    }
+
+    case 'punch': {
+      if (!arg) return err('usage: /punch <who>');
+
+      line('');
+      sys('hole punching works by both machines sending at the same instant, so');
+      sys('each firewall sees the reply to something its own side already sent.');
+      sys('that only works if they have meshchat open right now — tell them to');
+      sys('run /punch back at you before you continue.');
+      line('');
+
+      const result = await call('punch', arg);
+      if (result.alreadyOnline) return sys(`${result.name} is already connected`);
+
+      sys(`waiting for the shared window (${(result.windowMs / 1000).toFixed(1)}s), then firing...`);
+      line('');
+
+      if (result.ok) {
+        line(`  connected to ${result.name} — the punch got through.`, 'hot');
+      } else {
+        line('  punch failed:', 'err');
+        for (const reason of result.reasons) line(`  ${reason}`, 'err');
+        line('', 'sys');
+        line('  if they were definitely running, one of the two networks drops', 'sys');
+        line('  reciprocal udp. mobile carriers usually do. at that point one end', 'sys');
+        line('  needs a connection that accepts inbound — wired broadband with an', 'sys');
+        line('  ipv6 pinhole open on this port.', 'sys');
       }
       line('');
       return;

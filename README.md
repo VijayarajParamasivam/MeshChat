@@ -56,7 +56,63 @@ to send to. A firewall is a *policy*: the packets can be delivered, something is
 just choosing to drop them. Windows blocks unsolicited inbound by default, hardest
 of all on the "Public" profile that most WiFi gets classified as.
 
-Run `/firewall` and accept the prompt. That's the whole fix.
+Run `/firewall` and accept the prompt. That's the whole fix — for *your* firewall.
+Somebody else's is another matter.
+
+### When neither of you can be dialled
+
+Windows you control. Your ISP's firewall, or a mobile carrier's, you don't — and
+mobile networks drop unsolicited inbound as a matter of policy. Two people in
+that position both look permanently offline to each other, and no amount of
+retrying changes it.
+
+The reason is narrower than it first appears. A stateful firewall doesn't block
+inbound packets, it blocks packets belonging to no conversation, and the
+conversation is keyed on the *whole* tuple — both addresses and both ports. Dial
+out and your OS picks a random source port, so you open a pinhole for traffic
+coming back to that port, while your friend is knocking on your listening port.
+Both of you punch holes, both holes are in the wrong place.
+
+Make the two flows mirror each other and the problem disappears:
+
+```
+you  -> them:   [you]:47777  -> [them]:47777
+them -> you:    [them]:47777 -> [you]:47777
+```
+
+Now each side's outbound flow is exactly the inbound flow the other one needs,
+and each firewall sees an arriving packet as the reply to something its own user
+already sent. Nothing in the middle has to cooperate. The only thing both ends
+must agree on is the port, which is already in the contact card — so there is
+still no server, no STUN, and no third party of any kind.
+
+The catch is timing: a pinhole lives for tens of seconds, so both sides have to
+be sending at roughly the same moment. With nothing to coordinate through, they
+align on the wall clock instead, firing on a fixed 30-second boundary since the
+epoch. Clocks within a few seconds of each other land in the same window.
+
+Run `/punch <friend>` on both machines. It also happens automatically whenever an
+ordinary dial fails and the friend has an IPv6 address.
+
+This is UDP, not TCP. The technique works for both, but carriers treat a bare SYN
+from an unexpected direction far more harshly than a datagram. The cost is that
+UDP guarantees no ordering or delivery, so `src/core/punch.js` adds sequence
+numbers, cumulative acks and retransmission underneath — and presents the result
+as something shaped like a socket, so the handshake and encryption above it never
+learn they moved off TCP.
+
+**It is not guaranteed.** Some carriers refuse even reciprocal flows. Test yours
+before relying on it, on both machines at once:
+
+```
+npm run punch-test -- <their-ipv6-address>
+```
+
+That uses only the punch layer — no keys, no friend list — so if it fails, the
+network refused the technique rather than something breaking higher up. If it
+does fail, one end genuinely needs a connection that accepts inbound: wired
+broadband with an IPv6 pinhole open for TCP and UDP 47777. Only one, though —
+once either side is reachable, the other can always dial out to it.
 
 ## Using it
 
@@ -78,6 +134,8 @@ the only way they could know your address is that you gave them the card.
 /chat <who>        open a conversation
 /nearby            other MeshChat instances on this WiFi
 /net               connection diagnostics
+/try <who>         force a connection attempt and show why it failed
+/punch <who>       hole-punch when neither side can be dialled
 /firewall          allow inbound connections (asks for admin)
 /export            back up your identity
 ```
@@ -103,7 +161,8 @@ tried and exactly how each one failed, which narrows the cause immediately:
 - **nothing is listening** — you reached their machine, but MeshChat isn't
   running or is on another port.
 - **no reply** — packets are being dropped. A firewall, their router, or the
-  ISP. Both of you should run `/firewall`.
+  ISP. Both of you should run `/firewall`; if that doesn't do it and you both
+  have IPv6, try `/punch`.
 - **no route from here** — your machine has no path to that kind of address,
   which almost always means they published an IPv6 address and you have no IPv6.
 
@@ -127,8 +186,14 @@ IPv6 equivalent of `192.168.x.x` — and equally unreachable.
 
 **Both sides need real IPv6 for the direct path.** IPv4-only machines physically
 cannot send packets to an IPv6 address, so if one of you lacks it there is no
-shared route at all. Fastest way to test: tether from a Jio phone, which is
-IPv6-first and usually hands out a public address immediately.
+shared route at all.
+
+Tethering from a Jio phone is the fastest way to *get* an address — Indian mobile
+networks are IPv6-first — but be clear about what it buys you. A hotspot hands
+out a genuine global address that nothing can dial in to, because the carrier
+drops unsolicited inbound. It looks like working IPv6 and behaves like a wall.
+That combination is exactly what `/punch` exists for, and the honest test of
+whether your carrier allows it is `npm run punch-test`.
 
 ## Reality check
 
@@ -179,6 +244,14 @@ runs on a bare checkout. `test/crypto-and-transport.js` covers identity
 derivation, signature forgery, tampered payloads, contact-card validation and a
 real two-peer handshake over a socket. `test/ipv6.js` dials the machine's own
 global IPv6 address to prove the direct path, and skips where no IPv6 exists.
+`test/punch.js` covers window alignment, the two-way punch, and the reliability
+layer — including reordering and duplicates, which UDP produces and TCP never
+does — then runs a full identity handshake over a punched session to confirm the
+crypto above can't tell the transport changed underneath it.
+
+Those run on loopback, so they prove the mechanics rather than that your carrier
+permits them. `npm run punch-test -- <address>`, run on both machines at once, is
+the test for that.
 
 ## Layout
 
@@ -188,6 +261,7 @@ electron/preload.js    the only bridge to the UI
 src/core/crypto.js     signing, key agreement, sealed frames
 src/core/identity.js   key generation, Mesh ID derivation
 src/core/portal.js     IPv6 discovery, UPnP + NAT-PMP port mapping
+src/core/punch.js      UDP hole punching and its reliability layer
 src/core/firewall.js   Windows inbound allow rule
 src/core/card.js       signed contact codes
 src/core/transport.js  framing, handshake, TCP server and dialer

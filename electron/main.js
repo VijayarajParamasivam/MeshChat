@@ -214,6 +214,17 @@ const handlers = {
     return { name: friend.name, ...(await engine.probe(friend.id)) };
   },
 
+  async punch(query) {
+    const engine = requireEngine();
+    const friend = engine.resolve(query);
+    if (!friend) throw new Error(`no single match for "${query}"`);
+    return {
+      name: friend.name,
+      windowMs: engine.nextPunchWindowMs(),
+      ...(await engine.punchProbe(friend.id)),
+    };
+  },
+
   async ipv6() {
     return ipv6doctor.diagnose();
   },
