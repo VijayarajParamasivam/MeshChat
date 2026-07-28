@@ -85,12 +85,30 @@ async function diagnose() {
   const { global, linkLocal, uniqueLocal } = portal.classifyIPv6();
 
   if (global.length) {
+    // Having the address and being reachable at it are different things, and on
+    // a mobile network you get the first without the second: the carrier hands
+    // out a real global address, then drops every unsolicited packet aimed at
+    // it. Claiming "IPv6 is working" here sends people hunting for a fault on a
+    // machine that is configured perfectly.
     return {
       global,
       linkLocal,
       uniqueLocal,
-      verdict: 'IPv6 is working. You have a globally routable address.',
-      advice: [],
+      verdict: 'You have a globally routable IPv6 address.',
+      advice: [
+        '',
+        'That is the hard part, but it does not guarantee friends can reach you.',
+        'A router or carrier can still drop unsolicited inbound packets — mobile',
+        'networks almost always do, which is why a phone hotspot gives you a',
+        'perfect-looking address that nobody can connect to.',
+        '',
+        'To find out which you have, run /try <friend>:',
+        '  "no reply"  — something upstream is dropping the packets.',
+        '  "refused"   — they arrived, so the address is genuinely reachable.',
+        '',
+        'If both of you are being dropped, /punch has you both send at once,',
+        'which gets through some firewalls that neither of you can dial through.',
+      ],
     };
   }
 
@@ -129,9 +147,10 @@ async function diagnose() {
     '2. ISP does not provide IPv6 on your plan. Common on some Indian wired',
     '   providers. Ask support directly: "is IPv6 enabled on my connection?"',
     '',
-    '3. Quickest workaround: tether from a mobile phone. Indian mobile networks',
-    '   (Jio especially) are IPv6-first, so a hotspot usually gets you a public',
-    '   IPv6 address straight away. Good way to prove the app works.',
+    '3. A mobile hotspot will get you an IPv6 address in seconds, and Indian',
+    '   networks (Jio especially) are IPv6-first. But it is not a fix: carriers',
+    '   drop unsolicited inbound, so you get an address nobody can connect to.',
+    '   Useful for testing /punch, not for being reachable.',
     '',
     '4. If a VPN is running, turn it off and re-check — many block IPv6.',
   ];

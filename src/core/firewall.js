@@ -99,7 +99,11 @@ async function install(port) {
       `netsh advfirewall firewall delete rule name="${TCP_RULE}" >nul 2>&1`,
       `netsh advfirewall firewall delete rule name="${UDP_RULE}" >nul 2>&1`,
       `netsh advfirewall firewall add rule name="${TCP_RULE}" dir=in action=allow protocol=TCP localport=${tcpPort} profile=any`,
-      `netsh advfirewall firewall add rule name="${UDP_RULE}" dir=in action=allow protocol=UDP localport=${LAN_DISCOVERY_PORT} profile=any`,
+      // Two UDP ports: the multicast beacon, and the app port itself for hole
+      // punching. Windows is stateful and would normally let a punch back in as
+      // the reply to our own, but only if we punched first — whoever starts
+      // second would otherwise be dropped before the exchange ever begins.
+      `netsh advfirewall firewall add rule name="${UDP_RULE}" dir=in action=allow protocol=UDP localport=${tcpPort},${LAN_DISCOVERY_PORT} profile=any`,
       '',
     ].join('\r\n'),
     'utf8'
@@ -135,7 +139,7 @@ async function install(port) {
 
   const after = await status();
   return after.installed
-    ? { ok: true, message: `inbound allowed on TCP ${tcpPort} and UDP ${LAN_DISCOVERY_PORT}` }
+    ? { ok: true, message: `inbound allowed on TCP ${tcpPort} and UDP ${tcpPort}, ${LAN_DISCOVERY_PORT}` }
     : { ok: false, message: 'the rule did not appear afterwards — was the prompt declined?' };
 }
 

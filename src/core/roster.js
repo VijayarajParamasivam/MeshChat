@@ -18,6 +18,7 @@ const card = require('./card');
 const identity = require('./identity');
 const lan = require('./lan');
 const portal = require('./portal');
+const punch = require('./punch');
 const store = require('./store');
 const transport = require('./transport');
 
@@ -73,6 +74,29 @@ function explainDialFailure(endpoint, error) {
   }
 }
 
+/**
+ * A failed punch says something a failed dial cannot. Dialling proves only that
+ * *their* firewall dropped us; punching had both ends sending at once, so if
+ * nothing crossed then at least one of the two networks refuses the technique
+ * outright — which is the point at which no client-side change can help.
+ */
+function explainPunchFailure(endpoint, error) {
+  const where = `punch ${formatEndpoint(endpoint)}`;
+
+  switch (error.code) {
+    case 'EPUNCHFAIL':
+      return `${where} — nothing crossed. either they were not running, or one of the two networks drops reciprocal udp.`;
+    case 'EPUNCHLOST':
+      return `${where} — the path opened then died: ${error.message}`;
+    case 'ETIMEDOUT':
+      return `${where} — packets crossed but the handshake stalled.`;
+    case 'EHANDSHAKE':
+      return `${where} — reached them, but the handshake failed: ${error.message}`;
+    default:
+      return `${where} — ${error.message}`;
+  }
+}
+
 class Mesh extends EventEmitter {
   constructor() {
     super();
@@ -86,6 +110,8 @@ class Mesh extends EventEmitter {
 
     this.server = null;
     this.beacon = null;
+    this.hub = null;
+    this.punching = new Set();
     this.port = null;
     this.cardCode = null;
     this.redialTimer = null;
@@ -123,6 +149,8 @@ class Mesh extends EventEmitter {
       this.log(status.ipv4Note);
     }
 
+    await this._startHub();
+
     this.beacon = new lan.LanBeacon();
     this.beacon.on('log', (m) => this.log(m));
     this.beacon.on('peer', (peer) => this._onLanPeer(peer));
@@ -151,10 +179,97 @@ class Mesh extends EventEmitter {
     throw new Error('no free port in range');
   }
 
+  /**
+   * Bring up the hole-punching socket. UDP and TCP port numbers live in separate
+   * spaces, so this shares the number the TCP listener already took — which is
+   * what we want, since the peer only ever learns one port from our card.
+   *
+   * Failure here is not fatal. Punching is the path of last resort; if the
+   * socket will not bind, every ordinary route still works.
+   */
+  async _startHub() {
+    // A second instance on this machine takes the next TCP port up, which lands
+    // exactly on the multicast beacon's UDP port. Both would bind it with
+    // reuseAddr and then quietly steal each other's datagrams. Punching is for
+    // peers on different networks, so the second instance simply goes without.
+    if (this.port === lan.PORT) {
+      this.log('hole punching off: this port collides with lan discovery');
+      return;
+    }
+
+    try {
+      this.hub = new punch.Hub(this.port);
+      this.hub.on('log', (m) => this.log(m));
+      this.hub.on('session', (stream) => this._onPunchedIn(stream));
+      await this.hub.start();
+      this.log(`hole punching ready on udp ${this.port}`);
+    } catch (err) {
+      this.hub = null;
+      this.log(`hole punching unavailable: ${err.message}`);
+    }
+  }
+
+  /** A peer punched through to us before we managed to reach them. */
+  async _onPunchedIn(stream) {
+    try {
+      const link = await transport.overStream(stream, this._context());
+      this._adopt(link);
+    } catch (err) {
+      this.log(`punched-in peer failed the handshake: ${err.message}`);
+    }
+  }
+
+  /**
+   * Last resort: punch a hole to a friend neither of us can dial.
+   *
+   * Only IPv6 endpoints are worth trying. Behind IPv4 NAT the port we send from
+   * is rewritten to something neither side can predict, so the two flows never
+   * line up — that is the problem STUN exists to solve, and solving it means
+   * involving a third party we have deliberately ruled out. With IPv6 the
+   * addresses and ports are ours, unchanged end to end, so the flows match by
+   * construction.
+   */
+  async _punchTo(friend, { aligned = true, verbose = false } = {}) {
+    if (!this.hub) return null;
+    if (this.links.has(friend.id) || this.punching.has(friend.id)) return null;
+
+    const targets = (friend.endpoints || []).filter(
+      (e) => e.type === 'ip6' && !this._isSelf(e)
+    );
+    if (!targets.length) return null;
+
+    const reasons = [];
+    this.punching.add(friend.id);
+    try {
+      for (const endpoint of targets) {
+        if (verbose) {
+          const wait = aligned ? punch.msUntilWindow() : 0;
+          this.log(
+            `punching ${formatEndpoint(endpoint)} — firing in ${(wait / 1000).toFixed(1)}s, ` +
+              'their machine must be running too'
+          );
+        }
+
+        try {
+          const stream = await this.hub.punch(endpoint.host, endpoint.port, { aligned });
+          const link = await transport.overStream(stream, this._context(), friend.id);
+          this._adopt(link);
+          return { ok: true, reasons: [] };
+        } catch (err) {
+          reasons.push(explainPunchFailure(endpoint, err));
+        }
+      }
+      return { ok: false, reasons };
+    } finally {
+      this.punching.delete(friend.id);
+    }
+  }
+
   async stop() {
     clearInterval(this.redialTimer);
     clearInterval(this.cardTimer);
     if (this.beacon) this.beacon.stop();
+    if (this.hub) this.hub.stop();
     for (const link of this.links.values()) link.close();
     this.links.clear();
     if (this.server) this.server.close();
@@ -398,6 +513,10 @@ class Mesh extends EventEmitter {
 
   async _connect(friend, { verbose = false } = {}) {
     if (this.links.has(friend.id) || this.dialing.has(friend.id)) return null;
+    // A punch waits for the shared clock boundary and can outlast the redial
+    // timer, so it needs its own guard or the next tick starts a second attempt
+    // on top of the one still waiting.
+    if (this.punching.has(friend.id)) return null;
 
     const endpoints = this._orderEndpoints(friend.endpoints);
     if (!endpoints.length) {
@@ -416,13 +535,20 @@ class Mesh extends EventEmitter {
         this._adopt(link);
         return { ok: true, reasons: [] };
       }
-
-      this._backOff(friend.id);
-      this._reportFailure(friend, failures, verbose);
-      return { ok: false, reasons: failures };
     } finally {
       this.dialing.delete(friend.id);
     }
+
+    // Every ordinary route was dropped. If they have an IPv6 address, both of us
+    // sending at the same instant can still get through where either of us
+    // sending alone cannot.
+    const punched = await this._punchTo(friend, { verbose });
+    if (punched?.ok) return { ok: true, reasons: [] };
+    if (punched) failures.push(...punched.reasons);
+
+    this._backOff(friend.id);
+    this._reportFailure(friend, failures, verbose);
+    return { ok: false, reasons: failures };
   }
 
   /**
@@ -456,6 +582,44 @@ class Mesh extends EventEmitter {
     };
 
     return { ...result, endpoints: this._orderEndpoints(friend.endpoints) };
+  }
+
+  /**
+   * Force a hole-punch attempt on its own, for /punch.
+   *
+   * Kept separate from `probe` because it demands something of the user that no
+   * other command does: the friend has to be sitting in front of their machine
+   * with MeshChat open at the same moment. Reporting how long until the shared
+   * window opens is what makes that coordination possible.
+   */
+  async punchProbe(friendId) {
+    const friend = this.friends.get(friendId);
+    if (!friend) throw new Error('not a friend');
+    if (!this.hub) {
+      return { ok: false, reasons: ['hole punching is not running on this machine'] };
+    }
+    if (this.links.has(friendId)) {
+      return { ok: true, alreadyOnline: true, reasons: [] };
+    }
+
+    const targets = (friend.endpoints || []).filter((e) => e.type === 'ip6');
+    if (!targets.length) {
+      return {
+        ok: false,
+        reasons: ['their card has no ipv6 address — punching cannot work over ipv4 nat'],
+      };
+    }
+
+    this.attempts.delete(friendId);
+    this.nextTry.delete(friendId);
+
+    const result = await this._punchTo(friend, { verbose: true });
+    return result || { ok: false, reasons: ['a punch is already in progress'] };
+  }
+
+  /** Seconds until the next shared punch window, so both ends can line up. */
+  nextPunchWindowMs() {
+    return punch.msUntilWindow();
   }
 
   /**
@@ -547,6 +711,7 @@ class Mesh extends EventEmitter {
     const now = Date.now();
     for (const friend of this.friends.values()) {
       if (this.links.has(friend.id) || this.dialing.has(friend.id)) continue;
+      if (this.punching.has(friend.id)) continue;
       if ((this.nextTry.get(friend.id) || 0) > now) continue;
       if (!friend.endpoints?.length) continue;
       this._connect(friend).catch(() => {});

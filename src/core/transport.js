@@ -238,6 +238,49 @@ function listen(port, getCtx, onLink) {
 }
 
 /**
+ * Run the handshake over an already-connected stream.
+ *
+ * Split out of `dial` because a punched UDP session arrives already open —
+ * there is no connect step to wait for — and because `Link` is deliberately
+ * symmetric: both ends send `hello` and both answer with `proof`, so neither
+ * has to be designated the caller. That is what lets two peers who dialled each
+ * other simultaneously end up with one working channel instead of a deadlock.
+ */
+function overStream(stream, ctx, expectId = null, timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const fail = (reason, code) => {
+      if (settled) return;
+      settled = true;
+      try {
+        stream.destroy();
+      } catch {
+        /* already gone */
+      }
+      const error = new Error(reason);
+      error.code = code || 'EHANDSHAKE';
+      reject(error);
+    };
+
+    const timer = setTimeout(() => fail(`handshake stalled after ${timeoutMs}ms`, 'ETIMEDOUT'), timeoutMs);
+    const link = new Link(stream, ctx, { expectId });
+
+    link.once('ready', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(link);
+    });
+
+    link.once('failed', (reason) => {
+      clearTimeout(timer);
+      fail(reason, 'EHANDSHAKE');
+    });
+  });
+}
+
+/**
  * Dial a friend directly. Resolves only once the handshake has completed and
  * the peer has proven its identity, so a resolved Link is always trustworthy.
  */
@@ -286,4 +329,4 @@ function dial(host, port, ctx, expectId, timeoutMs = 8000) {
   });
 }
 
-module.exports = { Link, listen, dial };
+module.exports = { Link, listen, dial, overStream };
