@@ -37,7 +37,7 @@ function makeCardWithoutOnion() {
     boxPrivate: box.privateKey,
     boxPublic: c.exportPublic(box.publicKey),
   };
-  const profile = { id: c.deriveMeshId(keys.signPublic), name: 'legacy', sigil: 'L' };
+  const profile = { id: c.deriveId(keys.signPublic), name: 'legacy', sigil: 'L' };
   return card.create(profile, keys, [{ type: 'ip6', host: '2409:40f4::1', port: 47777 }]);
 }
 
@@ -187,15 +187,15 @@ function fakeSocks({ status = 0x00, echo = null } = {}) {
   const fs = require('fs');
   const path = require('path');
   const store = require('../src/core/store');
-  const { Mesh, ONION_PORT } = require('../src/core/roster');
+  const { TorChat, ONION_PORT } = require('../src/core/roster');
 
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'meshchat-private-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'torchat-private-'));
   store.init(dir);
   // addFriend compares an incoming card against our own identity, so one has to
   // exist for that path to be exercised rather than throwing on a null.
   require('../src/core/identity').create('tester', 'T');
 
-  const mesh = new Mesh();
+  const mesh = new TorChat();
   mesh.onion = ONION;
   mesh.tor = { ready: true };
 
@@ -214,7 +214,7 @@ function fakeSocks({ status = 0x00, echo = null } = {}) {
   // A stored card from an older build, or a hostile peer, may carry IPs. They
   // must be discarded on the way in — not merely sorted last — so there is
   // never an address in the friend list that could be dialled.
-  const friend = { id: 'MESH-X', endpoints: [] };
+  const friend = { id: 'TOR-X', endpoints: [] };
   mesh._mergeEndpoints(friend, [
     { type: 'ip6', host: '2409:40f4::1', port: 47777 },
     { type: 'lan', host: '192.168.1.5', port: 47777 },

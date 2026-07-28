@@ -1,26 +1,26 @@
 {
-  "name": "meshchat",
-  "version": "0.2.0",
+  "name": "torchat",
+  "version": "0.3.0",
   "private": true,
-  "description": "Serverless peer-to-peer chat. Your device talks to their device. Nothing in between.",
+  "description": "Peer-to-peer chat over Tor onion services. No accounts, no servers you can name, and no IP address of yours is ever published.",
   "keywords": [
     "p2p",
     "peer-to-peer",
-    "decentralized",
-    "serverless",
+    "tor",
+    "onion-service",
+    "anonymous",
     "chat",
-    "ipv6",
-    "nat-traversal",
+    "privacy",
     "electron",
     "end-to-end-encryption"
   ],
-  "homepage": "https://github.com/VijayarajParamasivam/MeshChat#readme",
+  "homepage": "https://github.com/VijayarajParamasivam/TorChat#readme",
   "bugs": {
-    "url": "https://github.com/VijayarajParamasivam/MeshChat/issues"
+    "url": "https://github.com/VijayarajParamasivam/TorChat/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/VijayarajParamasivam/MeshChat.git"
+    "url": "git+https://github.com/VijayarajParamasivam/TorChat.git"
   },
   "license": "MIT",
   "author": "Vijayaraj Paramasivam",

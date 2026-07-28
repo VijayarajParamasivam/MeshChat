@@ -3,7 +3,7 @@
 /**
  * Your identity is a pair of keys generated on this machine, and that's all.
  * There is no signup, no account server, and nothing to look you up in —
- * your Mesh ID is a hash of your own public key, so holding the private key
+ * your TorChat ID is a hash of your own public key, so holding the private key
  * is the only proof of ownership that exists or is needed.
  */
 
@@ -37,7 +37,7 @@ function create(name, sigil = '*') {
   const signPublic = c.exportPublic(signing.publicKey);
 
   const record = {
-    id: c.deriveMeshId(signPublic),
+    id: c.deriveId(signPublic),
     name: String(name || 'anon').trim().slice(0, 24) || 'anon',
     sigil: String(sigil || '*').slice(0, 2),
     sign: { public: signPublic, private: c.exportPrivate(signing.privateKey) },
@@ -81,7 +81,7 @@ function setProfile({ name, sigil }) {
  */
 function exportBackup() {
   if (!current) throw new Error('no identity loaded');
-  return JSON.stringify({ meshchat: 1, identity: current }, null, 2);
+  return JSON.stringify({ torchat: 1, identity: current }, null, 2);
 }
 
 function importBackup(json) {
@@ -89,7 +89,7 @@ function importBackup(json) {
   const record = parsed.identity || parsed;
 
   if (!record.sign?.private || !record.box?.private) {
-    throw new Error('not a MeshChat identity backup');
+    throw new Error('not a TorChat identity backup');
   }
   if (!c.idMatchesKey(record.id, record.sign.public)) {
     throw new Error('backup is corrupt: ID does not match its key');

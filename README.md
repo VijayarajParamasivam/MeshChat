@@ -1,12 +1,12 @@
-# MeshChat
+# TorChat
 
 Peer-to-peer chat where every connection is a Tor onion service. No accounts, no
 directory, no company in the middle — and no IP address of yours is ever
 published, sent, or dialled.
 
 ```
-git clone https://github.com/VijayarajParamasivam/MeshChat.git
-cd MeshChat
+git clone https://github.com/VijayarajParamasivam/TorChat.git
+cd TorChat
 npm install
 npm start
 ```
@@ -17,7 +17,7 @@ publishes your onion service, and you can chat.
 
 ## How it works
 
-Your identity is an **Ed25519 key pair** generated on your machine. Your Mesh ID
+Your identity is an **Ed25519 key pair** generated on your machine. Your TorChat ID
 is a hash of the public half, so nobody can claim your ID without your private
 key. There is no registry to check it against and none is needed.
 
@@ -35,7 +35,7 @@ carrying your traffic sees what an eavesdropper on a LAN cable sees: sealed byte
 
 ## Why onion services, and not direct connections
 
-MeshChat used to try very hard to connect two machines directly. It asked routers
+TorChat used to try very hard to connect two machines directly. It asked routers
 for port mappings over UPnP and NAT-PMP, opened IPv6 firewall pinholes over UPnP
 IGDv2 and PCP, punched UDP holes on three ports at once with clock-aligned
 windows, and fell back to TCP simultaneous open. Around 2,700 lines of it.
@@ -98,7 +98,7 @@ for testing against yourself.
 publishes your descriptor. Progress is logged so it doesn't look hung. Later
 launches are faster.
 
-**A friend has to be running MeshChat to be reachable.** An onion service only
+**A friend has to be running TorChat to be reachable.** An onion service only
 answers while it's published. There is no router, firewall or ISP involved on
 either side, so if `/try` fails, they are almost certainly not running it.
 
@@ -131,7 +131,7 @@ who it's contacting.
 
 ## Security
 
-- Identity is an Ed25519 key pair; your Mesh ID is a hash of the public key.
+- Identity is an Ed25519 key pair; your TorChat ID is a hash of the public key.
 - Contact cards are signed. An altered card is rejected.
 - Every connection runs a nonce challenge in both directions, so possessing
   someone's public card doesn't let you impersonate them.
@@ -160,7 +160,7 @@ particular friend is something only two machines can establish.
 electron/main.js       app lifecycle, IPC, engine ownership
 electron/preload.js    the only bridge to the UI
 src/core/crypto.js     signing, key agreement, sealed frames
-src/core/identity.js   key generation, Mesh ID derivation
+src/core/identity.js   key generation, TorChat ID derivation
 src/core/card.js       signed contact codes
 src/core/tor.js        tor process, onion service, SOCKS5 dialer
 src/core/transport.js  framing, handshake, encrypted channel

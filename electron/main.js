@@ -5,7 +5,7 @@
  * over IPC. The renderer has no Node access at all — it only sees the narrow
  * surface defined in preload.js.
  *
- * Set MESH_PROFILE to run a second, completely independent identity on the same
+ * Set TORCHAT_PROFILE to run a second, completely independent identity on the same
  * machine (separate data directory; the TCP port auto-increments). That's how
  * you talk to yourself for testing.
  */
@@ -16,15 +16,15 @@ const { app, BrowserWindow, ipcMain, clipboard } = require('electron');
 
 const identity = require('../src/core/identity');
 const store = require('../src/core/store');
-const { Mesh } = require('../src/core/roster');
+const { TorChat } = require('../src/core/roster');
 
-const profileName = process.env.MESH_PROFILE || '';
+const profileName = process.env.TORCHAT_PROFILE || '';
 if (profileName) {
   app.setPath('userData', `${app.getPath('userData')}-${profileName}`);
 }
 
 let win = null;
-let mesh = null;
+let active = null;
 let starting = null;
 
 function send(channel, payload) {
@@ -33,28 +33,28 @@ function send(channel, payload) {
 
 /** Boot the engine once an identity exists. Safe to call repeatedly. */
 function startEngine() {
-  if (mesh) return Promise.resolve(mesh);
+  if (active) return Promise.resolve(active);
   if (starting) return starting;
 
-  const engine = new Mesh();
-  engine.on('log', (text) => send('mesh:log', text));
-  engine.on('status', (payload) => send('mesh:status', payload));
-  engine.on('message', (payload) => send('mesh:message', payload));
-  engine.on('delivered', (payload) => send('mesh:delivered', payload));
-  engine.on('ready', (payload) => send('mesh:ready', payload));
-  engine.on('friends-changed', () => send('mesh:friends-changed'));
-  engine.on('history-changed', (payload) => send('mesh:history-changed', payload));
+  const engine = new TorChat();
+  engine.on('log', (text) => send('torchat:log', text));
+  engine.on('status', (payload) => send('torchat:status', payload));
+  engine.on('message', (payload) => send('torchat:message', payload));
+  engine.on('delivered', (payload) => send('torchat:delivered', payload));
+  engine.on('ready', (payload) => send('torchat:ready', payload));
+  engine.on('friends-changed', () => send('torchat:friends-changed'));
+  engine.on('history-changed', (payload) => send('torchat:history-changed', payload));
 
   starting = engine
     .start()
     .then(() => {
-      mesh = engine;
+      active = engine;
       starting = null;
-      return mesh;
+      return active;
     })
     .catch((err) => {
       starting = null;
-      send('mesh:log', `engine failed to start: ${err.message}`);
+      send('torchat:log', `engine failed to start: ${err.message}`);
       throw err;
     });
 
@@ -62,8 +62,8 @@ function startEngine() {
 }
 
 function requireEngine() {
-  if (!mesh) throw new Error('no identity yet — set a handle first');
-  return mesh;
+  if (!active) throw new Error('no identity yet — set a handle first');
+  return active;
 }
 
 function createWindow() {
@@ -71,7 +71,7 @@ function createWindow() {
     width: 940,
     height: 660,
     backgroundColor: '#000000',
-    title: profileName ? `MeshChat [${profileName}]` : 'MeshChat',
+    title: profileName ? `TorChat [${profileName}]` : 'TorChat',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -103,7 +103,7 @@ app.on('before-quit', async (event) => {
   event.preventDefault();
   cleanedUp = true;
   try {
-    if (mesh) await mesh.stop();
+    if (active) await active.stop();
     else store.flush();
   } catch {
     /* shutting down anyway */
@@ -128,10 +128,10 @@ const handlers = {
     const profile = identity.profile();
     return {
       profile,
-      running: Boolean(mesh),
-      tor: mesh ? mesh.status() : null,
-      port: mesh ? mesh.port : null,
-      friends: mesh ? mesh.list() : [],
+      running: Boolean(active),
+      tor: active ? active.status() : null,
+      port: active ? active.port : null,
+      friends: active ? active.list() : [],
       dataDir: store.root,
       instance: profileName || null,
     };
@@ -141,7 +141,7 @@ const handlers = {
     if (identity.get()) throw new Error('an identity already exists here');
     identity.create(name, sigil);
     await startEngine();
-    return { profile: identity.profile(), tor: mesh.status() };
+    return { profile: identity.profile(), tor: active.status() };
   },
 
   card() {
@@ -167,7 +167,7 @@ const handlers = {
   },
 
   friends() {
-    return mesh ? mesh.list() : [];
+    return active ? active.list() : [];
   },
 
   resolve(query) {
@@ -192,21 +192,21 @@ const handlers = {
   },
 
   exportIdentity() {
-    const file = path.join(store.root, 'meshchat-identity-backup.json');
+    const file = path.join(store.root, 'torchat-identity-backup.json');
     fs.writeFileSync(file, identity.exportBackup(), 'utf8');
     return file;
   },
 
   async importIdentity(file) {
     identity.importBackup(fs.readFileSync(file, 'utf8'));
-    if (mesh) await mesh.stop();
-    mesh = null;
+    if (active) await active.stop();
+    active = null;
     await startEngine();
     return identity.profile();
   },
 };
 
-ipcMain.handle('mesh:call', async (_event, method, payload) => {
+ipcMain.handle('torchat:call', async (_event, method, payload) => {
   const handler = handlers[method];
   if (!handler) throw new Error(`unknown call ${method}`);
   try {

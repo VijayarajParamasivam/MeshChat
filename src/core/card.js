@@ -2,7 +2,7 @@
 
 /**
  * A contact card is the thing you copy and send to a friend over any channel you
- * like — WhatsApp, email, a sticky note. It carries who you are (Mesh ID and both
+ * like — WhatsApp, email, a sticky note. It carries who you are (TorChat ID and both
  * public keys) and where to reach you, signed so that a card altered in transit
  * is rejected.
  *
@@ -18,7 +18,7 @@
 
 const c = require('./crypto');
 
-const PREFIX = 'MESH1.';
+const PREFIX = 'TORCHAT1.';
 
 /** Deterministic JSON so both ends sign and verify byte-identical input. */
 function canonical(value) {
@@ -66,7 +66,7 @@ function create(profile, keys, endpoints = []) {
 function parse(code) {
   const trimmed = String(code || '').trim().replace(/\s+/g, '');
   if (!trimmed.startsWith(PREFIX)) {
-    throw new Error('that does not look like a MeshChat code');
+    throw new Error('that does not look like a TorChat code');
   }
 
   let card;

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Fetch the Tor binary MeshChat needs, so `npm install` leaves a working app.
+ * Fetch the Tor binary TorChat needs, so `npm install` leaves a working app.
  *
  * Runs from `postinstall`. Tor is not an npm package and there is no meaningful
  * way to vendor a 15 MB platform-specific binary in git, so it is downloaded
@@ -80,7 +80,7 @@ function download(url, destination, redirects = 5) {
     if (redirects < 0) return reject(new Error('too many redirects'));
 
     https
-      .get(url, { headers: { 'User-Agent': 'MeshChat-installer' } }, (res) => {
+      .get(url, { headers: { 'User-Agent': 'TorChat-installer' } }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
           return resolve(download(new URL(res.headers.location, url).toString(), destination, redirects - 1));
@@ -134,27 +134,27 @@ function extract(archive, into) {
 }
 
 async function main() {
-  if (process.env.MESHCHAT_SKIP_TOR) {
-    say('meshchat: MESHCHAT_SKIP_TOR set, skipping the Tor download.');
+  if (process.env.TORCHAT_SKIP_TOR) {
+    say('torchat: TORCHAT_SKIP_TOR set, skipping the Tor download.');
     return;
   }
 
   if (fs.existsSync(binaryPath())) {
-    say(`meshchat: tor ${VERSION} already present.`);
+    say(`torchat: tor ${VERSION} already present.`);
     return;
   }
 
   const bundle = pick();
   if (!bundle) {
-    say(`meshchat: no Tor build for ${process.platform}/${process.arch}.`);
-    say('  install tor yourself and set MESHCHAT_TOR to its path.');
+    say(`torchat: no Tor build for ${process.platform}/${process.arch}.`);
+    say('  install tor yourself and set TORCHAT_TOR to its path.');
     return;
   }
 
   fs.mkdirSync(VENDOR, { recursive: true });
   const archive = path.join(VENDOR, bundle.file);
 
-  say(`meshchat: downloading tor ${VERSION} (about 15 MB)...`);
+  say(`torchat: downloading tor ${VERSION} (about 15 MB)...`);
 
   try {
     await download(`${BASE}/${bundle.file}`, archive);
@@ -178,20 +178,20 @@ async function main() {
       throw new Error('archive unpacked but no tor binary was found inside it');
     }
 
-    say(`meshchat: tor ready at vendor/tor. run "npm start" to begin.`);
+    say(`torchat: tor ready at vendor/tor. run "npm start" to begin.`);
   } catch (err) {
     // A failed download must not fail the install. The app still runs, and
     // /tor explains what is missing and how to supply it by hand.
     //
     // A verified archive is kept so a retry does not re-download 15 MB; only an
     // unverified one is destroyed, and that happens above where it is detected.
-    say(`meshchat: could not fetch tor (${err.message}).`);
-    say('  MeshChat will still start, but /tor and /private need it.');
+    say(`torchat: could not fetch tor (${err.message}).`);
+    say('  TorChat will still start, but /tor and /private need it.');
     say('  Retry with "npm run get-tor", or install Tor Browser and let');
-    say('  MeshChat find its bundled binary automatically.');
+    say('  TorChat find its bundled binary automatically.');
   }
 }
 
 main().catch((err) => {
-  say(`meshchat: tor setup failed (${err.message}) — continuing anyway.`);
+  say(`torchat: tor setup failed (${err.message}) — continuing anyway.`);
 });

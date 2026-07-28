@@ -80,7 +80,7 @@ function candidatePaths() {
   const home = os.homedir();
   const list = [];
 
-  if (process.env.MESHCHAT_TOR) list.push(process.env.MESHCHAT_TOR);
+  if (process.env.TORCHAT_TOR) list.push(process.env.TORCHAT_TOR);
 
   // What `npm install` fetched. First choice, so a clean clone works with no
   // setup and without depending on whatever Tor the machine happens to have.
@@ -129,18 +129,18 @@ function installHint() {
       'Tor is not installed. Two ways to fix that:',
       '',
       '  1. Install Tor Browser from https://www.torproject.org/download/',
-      '     MeshChat finds its bundled tor.exe automatically and never opens',
+      '     TorChat finds its bundled tor.exe automatically and never opens',
       '     the browser itself.',
       '',
       '  2. Or download the "Tor Expert Bundle" from the same page, unzip it,',
-      '     and point MeshChat at it:  set MESHCHAT_TOR=C:\\path\\to\\tor.exe',
+      '     and point TorChat at it:  set TORCHAT_TOR=C:\\path\\to\\tor.exe',
     ];
   }
   return [
     'Tor is not installed. Install it with your package manager:',
     '  apt install tor      (Debian/Ubuntu)',
     '  brew install tor     (macOS)',
-    'Then restart MeshChat.',
+    'Then restart TorChat.',
   ];
 }
 
@@ -272,7 +272,7 @@ function socksConnect(socksPort, host, port, timeoutMs = DIAL_TIMEOUT_MS) {
  * A single control connection, kept open for the process lifetime.
  *
  * Onion services created without the Detach flag die with the connection that
- * made them, which is precisely what we want: quitting MeshChat should take the
+ * made them, which is precisely what we want: quitting TorChat should take the
  * service down rather than leave it advertised and unanswered.
  */
 class Control extends EventEmitter {
@@ -404,7 +404,7 @@ class Tor extends EventEmitter {
    * Launch tor and wait for it to finish bootstrapping.
    *
    * Its own DataDirectory lives under the app's store rather than the system
-   * one, so MeshChat never disturbs a Tor the user runs for anything else.
+   * one, so TorChat never disturbs a Tor the user runs for anything else.
    */
   async start() {
     const binary = find();

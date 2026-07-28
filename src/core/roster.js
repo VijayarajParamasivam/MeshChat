@@ -64,13 +64,13 @@ function explainDialFailure(endpoint, error) {
       // Tor reports "host unreachable" for a service that is not running, which
       // is the ordinary case of a friend having the app closed.
       if (/offline|unreachable/i.test(error.message)) {
-        return `${where} — their meshchat is not running.`;
+        return `${where} — their torchat is not running.`;
       }
       return `${where} — ${error.message}`;
   }
 }
 
-class Mesh extends EventEmitter {
+class TorChat extends EventEmitter {
   constructor() {
     super();
     this.friends = new Map();
@@ -285,7 +285,7 @@ class Mesh extends EventEmitter {
     return existed;
   }
 
-  /** Look someone up by Mesh ID, a unique ID fragment, or display name. */
+  /** Look someone up by TorChat ID, a unique ID fragment, or display name. */
   resolve(query) {
     const q = String(query || '').trim();
     if (!q) return null;
@@ -578,4 +578,4 @@ class Mesh extends EventEmitter {
   }
 }
 
-module.exports = { Mesh, ONION_PORT };
+module.exports = { TorChat, ONION_PORT };

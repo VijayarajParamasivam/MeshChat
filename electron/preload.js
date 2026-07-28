@@ -9,19 +9,19 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const EVENTS = [
-  'mesh:log',
-  'mesh:status',
-  'mesh:message',
-  'mesh:delivered',
-  'mesh:ready',
-  'mesh:friends-changed',
-  'mesh:history-changed',
+  'torchat:log',
+  'torchat:status',
+  'torchat:message',
+  'torchat:delivered',
+  'torchat:ready',
+  'torchat:friends-changed',
+  'torchat:history-changed',
 ];
 
-contextBridge.exposeInMainWorld('mesh', {
+contextBridge.exposeInMainWorld('torchat', {
   /** Invoke an engine method. Rejects with a readable message on failure. */
   async call(method, payload) {
-    const result = await ipcRenderer.invoke('mesh:call', method, payload);
+    const result = await ipcRenderer.invoke('torchat:call', method, payload);
     if (!result.ok) throw new Error(result.error);
     return result.value;
   },

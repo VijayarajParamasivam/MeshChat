@@ -62,10 +62,10 @@ function showMessage(name, message) {
 }
 
 function banner() {
-  line('  __  __        _    ___ _         _   ', 'banner');
-  line(' |  \\/  |___ __| |_ / __| |_  __ _| |_ ', 'banner');
-  line(' | |\\/| / -_|_-< \' \\ (__| \' \\/ _` |  _|', 'banner');
-  line(' |_|  |_\\___/__/_||_\\___|_||_\\__,_|\\__|', 'banner');
+  line(' _____              ___  _          _   ', 'banner');
+  line('|_   _| ___  _ _  / __|| |_   __ _ | |_ ', 'banner');
+  line('  | |  / _ \\| \'_|| (__ | \' \\ / _` ||  _|', 'banner');
+  line('  |_|  \\___/|_|   \\___||_||_|\\__,_| \\__|', 'banner');
   line('');
   line(' every connection is an onion service.', 'hot');
   line(' no ip of yours is ever published, sent, or dialled.', 'sys');
@@ -75,7 +75,7 @@ function banner() {
 // --- engine calls ---------------------------------------------------------
 
 async function call(method, payload) {
-  return window.mesh.call(method, payload);
+  return window.torchat.call(method, payload);
 }
 
 function promptSymbol() {
@@ -87,7 +87,7 @@ async function enterReady(boot) {
   state.profile = boot.profile;
 
   sys(`handle   ${boot.profile.sigil} ${boot.profile.name}`);
-  sys(`mesh id  ${boot.profile.id}`);
+  sys(`torchat id  ${boot.profile.id}`);
   if (boot.instance) sys(`instance ${boot.instance} (separate identity for testing)`);
 
   if (boot.tor) describeTor(boot.tor);
@@ -221,7 +221,7 @@ async function runCommand(raw) {
     }
 
     case 'add': {
-      if (!arg) return err('usage: /add <code or mesh id>');
+      if (!arg) return err('usage: /add <code or torchat id>');
       sys('verifying and dialling...');
       const friend = await call('addFriend', arg);
       sys(`${friend.name} added — /chat ${friend.name}`);
@@ -263,7 +263,7 @@ async function runCommand(raw) {
     }
 
     case 'chat': {
-      if (!arg) return err('usage: /chat <name or mesh id>');
+      if (!arg) return err('usage: /chat <name or torchat id>');
       await openChat(arg);
       return;
     }
@@ -283,7 +283,7 @@ async function runCommand(raw) {
       sys(`friends  ${t.friends} known, ${t.online} online`);
       line('');
       if (!t.running) {
-        line('  tor is not running, so nothing can connect. restart meshchat.', 'err');
+        line('  tor is not running, so nothing can connect. restart torchat.', 'err');
       } else if (!t.published) {
         line('  the descriptor is still reaching the directory. give it a minute.', 'sys');
       } else {
@@ -312,7 +312,7 @@ async function runCommand(raw) {
       } else {
         for (const reason of result.reasons) line(`  ${reason}`, 'err');
         line('', 'sys');
-        line('  an onion answers only while their meshchat is open. there is no', 'sys');
+        line('  an onion answers only while their torchat is open. there is no', 'sys');
         line('  firewall or router involved on either side — if this fails, they', 'sys');
         line('  are almost certainly not running it.', 'sys');
       }
@@ -437,11 +437,11 @@ window.addEventListener('focus', () => captureEl.focus());
 
 // --- engine events --------------------------------------------------------
 
-window.mesh.on('mesh:log', (text) => sys(text));
+window.torchat.on('torchat:log', (text) => sys(text));
 
-window.mesh.on('mesh:ready', (status) => describeTor(status));
+window.torchat.on('torchat:ready', (status) => describeTor(status));
 
-window.mesh.on('mesh:message', ({ peerId, name, message }) => {
+window.torchat.on('torchat:message', ({ peerId, name, message }) => {
   if (state.active?.id === peerId) {
     showMessage(name, message);
     return;
@@ -451,14 +451,14 @@ window.mesh.on('mesh:message', ({ peerId, name, message }) => {
   line(`* ${name}: ${preview}   (/chat ${name})`, 'hot');
 });
 
-window.mesh.on('mesh:delivered', ({ id }) => {
+window.torchat.on('torchat:delivered', ({ id }) => {
   const el = document.getElementById(`m-${id}`);
   if (!el) return;
   const text = el.textContent.replace(/ \[(~|>)\]$/, '');
   el.textContent = `${text} [ok]`;
 });
 
-window.mesh.on('mesh:status', ({ id, name, online }) => {
+window.torchat.on('torchat:status', ({ id, name, online }) => {
   if (state.active?.id === id) {
     promptSymbol();
     sys(`${name} is ${online ? 'online' : 'offline'}`);

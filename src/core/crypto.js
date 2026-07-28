@@ -1,10 +1,10 @@
 'use strict';
 
 /**
- * All cryptography for MeshChat, built on Node's built-in crypto module.
+ * All cryptography for TorChat, built on Node's built-in crypto module.
  *
  * Two key types are used per identity:
- *   - Ed25519 for signing. This IS the identity: your Mesh ID is derived from
+ *   - Ed25519 for signing. This IS the identity: your TorChat ID is derived from
  *     the public half, so proving you hold the private half proves you are you.
  *   - X25519 for key agreement. Ed25519 keys cannot do ECDH, so a second pair
  *     is needed to derive the shared secret that encrypts the channel.
@@ -85,16 +85,16 @@ function verify(publicKeyEncoded, data, signature) {
 // --- identity ------------------------------------------------------------
 
 /**
- * Derive the human-facing Mesh ID from an exported Ed25519 public key.
+ * Derive the human-facing TorChat ID from an exported Ed25519 public key.
  *
  * SHA-256 the key, render the first 60 bits in Crockford base32 (no I/L/O/U,
  * so it survives being read aloud or copied by hand), and group it for legibility:
- *   MESH-4K7P-9XQ2-M3TV
+ *   TOR-4K7P-9XQ2-M3TV
  *
  * Because the ID is a hash of the key, nobody can claim yours without your
  * private key. That property is what replaces a server-side account registry.
  */
-function deriveMeshId(publicKeyEncoded) {
+function deriveId(publicKeyEncoded) {
   const hash = crypto.createHash('sha256').update(unb64u(publicKeyEncoded)).digest();
 
   let bits = '';
@@ -105,13 +105,13 @@ function deriveMeshId(publicKeyEncoded) {
     out += CROCKFORD[parseInt(bits.slice(i * 5, i * 5 + 5), 2)];
   }
 
-  return `MESH-${out.slice(0, 4)}-${out.slice(4, 8)}-${out.slice(8, 12)}`;
+  return `TOR-${out.slice(0, 4)}-${out.slice(4, 8)}-${out.slice(8, 12)}`;
 }
 
-/** Check that a Mesh ID really is the hash of the key claiming it. */
-function idMatchesKey(meshId, publicKeyEncoded) {
+/** Check that a TorChat ID really is the hash of the key claiming it. */
+function idMatchesKey(peerId, publicKeyEncoded) {
   try {
-    return deriveMeshId(publicKeyEncoded) === meshId;
+    return deriveId(publicKeyEncoded) === peerId;
   } catch {
     return false;
   }
@@ -134,7 +134,7 @@ function deriveChannelKey(myBoxPrivate, theirBoxPublicEncoded) {
   const mine = exportPublic(crypto.createPublicKey(myBoxPrivate));
   const salt = [mine, theirBoxPublicEncoded].sort().join('|');
 
-  return Buffer.from(crypto.hkdfSync('sha256', shared, salt, 'meshchat-channel-v1', 32));
+  return Buffer.from(crypto.hkdfSync('sha256', shared, salt, 'torchat-channel-v1', 32));
 }
 
 /** Encrypt a JSON-serialisable value. Layout: iv(12) | tag(16) | ciphertext. */
@@ -180,7 +180,7 @@ module.exports = {
   importPrivate,
   sign,
   verify,
-  deriveMeshId,
+  deriveId,
   idMatchesKey,
   deriveChannelKey,
   seal,

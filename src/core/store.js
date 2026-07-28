@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Everything MeshChat knows lives on this disk and nowhere else: your keys,
+ * Everything TorChat knows lives on this disk and nowhere else: your keys,
  * your friend list, and every conversation. There is no remote copy, which is
  * the point, so treat the identity file the way you'd treat a password.
  *
@@ -134,12 +134,12 @@ function flush() {
 // --- settings -------------------------------------------------------------
 
 /**
- * Small persistent knobs: whether Tor is on, whether private mode is on, and
- * the onion service key.
+ * Currently just the onion service key.
  *
- * The key lives here rather than with the identity because it is a different
- * kind of secret — losing the identity key costs you your name, while losing
- * this one only costs you your address, and every friend's card goes stale.
+ * It lives here rather than with the identity because it is a different kind of
+ * secret. Losing the identity key costs you your name; losing this one costs you
+ * your address, and every friend's card goes stale pointing at a service that no
+ * longer answers.
  */
 function readSettings() {
   return readJson(filePath('settings.json'), {});

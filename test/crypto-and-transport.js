@@ -31,7 +31,7 @@ function makePeer(name) {
     boxPrivate: box.privateKey,
     boxPublic: c.exportPublic(box.publicKey),
   };
-  return { profile: { id: c.deriveMeshId(keys.signPublic), name, sigil: name[0] }, keys };
+  return { profile: { id: c.deriveId(keys.signPublic), name, sigil: name[0] }, keys };
 }
 
 (async function main() {
@@ -39,10 +39,10 @@ function makePeer(name) {
   const a = makePeer('alice');
   const b = makePeer('bob');
 
-  check('mesh id shape', /^MESH-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$/.test(a.profile.id));
-  check('mesh id derives from key', c.idMatchesKey(a.profile.id, a.keys.signPublic));
-  check('mesh ids differ', a.profile.id !== b.profile.id);
-  check('mesh id is stable', c.deriveMeshId(a.keys.signPublic) === a.profile.id);
+  check('torchat id shape', /^TOR-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$/.test(a.profile.id));
+  check('torchat id derives from key', c.idMatchesKey(a.profile.id, a.keys.signPublic));
+  check('torchat ids differ', a.profile.id !== b.profile.id);
+  check('torchat id is stable', c.deriveId(a.keys.signPublic) === a.profile.id);
 
   // --- signing ------------------------------------------------------------
   const sig = c.sign(a.keys.signPrivate, 'hello');
@@ -73,7 +73,7 @@ function makePeer(name) {
   const codeA = card.create(a.profile, a.keys, [
     { type: 'lan', host: '127.0.0.1', port: PORT },
   ]);
-  check('code carries the MESH1 prefix', codeA.startsWith('MESH1.'));
+  check('code carries the TORCHAT1 prefix', codeA.startsWith('TORCHAT1.'));
 
   const parsed = card.parse(codeA);
   check('card round trips the id', parsed.id === a.profile.id);
@@ -83,7 +83,7 @@ function makePeer(name) {
   try {
     const raw = JSON.parse(Buffer.from(codeA.slice(6), 'base64url').toString());
     raw.name = 'mallory';
-    card.parse(`MESH1.${Buffer.from(JSON.stringify(raw)).toString('base64url')}`);
+    card.parse(`TORCHAT1.${Buffer.from(JSON.stringify(raw)).toString('base64url')}`);
   } catch {
     forgeCaught = true;
   }
