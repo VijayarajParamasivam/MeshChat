@@ -17,6 +17,8 @@
  */
 
 const c = require('./crypto');
+const Endpoint = require('../models/endpoint');
+const Profile = require('../models/profile');
 
 const PREFIX = 'TORCHAT1.';
 
@@ -47,11 +49,7 @@ function create(profile, keys, endpoints = []) {
     box: keys.boxPublic,
     name: profile.name,
     sigil: profile.sigil,
-    endpoints: endpoints.map((e) => ({
-      type: e.type,
-      host: e.host,
-      port: Number(e.port),
-    })),
+    endpoints: endpoints.map(Endpoint.forCard),
     ts: Date.now(),
   };
 
@@ -100,8 +98,8 @@ function parse(code) {
     id: card.id,
     sign: card.sign,
     box: card.box,
-    name: String(card.name || 'anon').slice(0, 24),
-    sigil: String(card.sigil || '*').slice(0, 2),
+    name: Profile.name(card.name),
+    sigil: Profile.sigil(card.sigil),
     endpoints: Array.isArray(card.endpoints) ? card.endpoints : [],
     ts: card.ts,
   };

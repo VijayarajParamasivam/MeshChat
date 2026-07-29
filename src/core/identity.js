@@ -9,6 +9,7 @@
 
 const c = require('./crypto');
 const store = require('./store');
+const Profile = require('../models/profile');
 
 let current = null;
 let keys = null;
@@ -38,8 +39,8 @@ function create(name, sigil = '*') {
 
   const record = {
     id: c.deriveId(signPublic),
-    name: String(name || 'anon').trim().slice(0, 24) || 'anon',
-    sigil: String(sigil || '*').slice(0, 2),
+    name: Profile.name(name),
+    sigil: Profile.sigil(sigil),
     sign: { public: signPublic, private: c.exportPrivate(signing.privateKey) },
     box: {
       public: c.exportPublic(box.publicKey),
@@ -69,8 +70,8 @@ function profile() {
 
 function setProfile({ name, sigil }) {
   if (!current) throw new Error('no identity loaded');
-  if (name) current.name = String(name).trim().slice(0, 24) || current.name;
-  if (sigil) current.sigil = String(sigil).slice(0, 2);
+  if (name) current.name = Profile.name(name, current.name);
+  if (sigil) current.sigil = Profile.sigil(sigil, current.sigil);
   store.writeIdentity(current);
   return profile();
 }

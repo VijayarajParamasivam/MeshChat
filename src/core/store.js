@@ -13,6 +13,8 @@
 const fs = require('fs');
 const path = require('path');
 
+const Message = require('../models/message');
+
 const HISTORY_CAP = 2000;
 const SAVE_DEBOUNCE_MS = 300;
 
@@ -157,7 +159,7 @@ function hasMessage(peerId, messageId) {
  * proves delivery, so only `delivered` is excluded here.
  */
 function undelivered(peerId) {
-  return loadConversation(peerId).filter((m) => m.mine && m.state !== 'delivered');
+  return loadConversation(peerId).filter(Message.isAwaitingAck);
 }
 
 /** Force every pending write to disk. Called on quit. */

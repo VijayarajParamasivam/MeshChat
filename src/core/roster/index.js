@@ -36,6 +36,7 @@ const store = require('../store');
 const tor = require('../tor');
 const transport = require('../transport');
 
+const Endpoint = require('../../models/endpoint');
 const { ONION_PORT, REDIAL_INTERVAL_MS, DIAL_TIMEOUT_MS } = require('./constants');
 const { FriendBook } = require('./friends');
 const { Messenger } = require('./messages');
@@ -182,7 +183,7 @@ class TorChat extends EventEmitter {
    * no IP in the program to leak.
    */
   _localEndpoints() {
-    return this.onion ? [{ type: 'onion', host: this.onion, port: ONION_PORT }] : [];
+    return this.onion ? [Endpoint.onion(this.onion, ONION_PORT)] : [];
   }
 
   _rebuildCard() {

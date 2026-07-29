@@ -23,11 +23,11 @@ function check(name, condition) {
   if (!condition) failures++;
 }
 
-const ROOT = path.join(__dirname, '..');
-const commandsSource = fs.readFileSync(path.join(ROOT, 'ui', 'commands.js'), 'utf8');
+const ROOT = path.join(__dirname, '..', '..');
+const commandsSource = fs.readFileSync(path.join(ROOT, 'src', 'ui', 'commands.js'), 'utf8');
 const mainSource = fs.readFileSync(path.join(ROOT, 'electron', 'main.js'), 'utf8');
-const terminalSource = fs.readFileSync(path.join(ROOT, 'ui', 'terminal.js'), 'utf8');
-const indexHtml = fs.readFileSync(path.join(ROOT, 'ui', 'index.html'), 'utf8');
+const terminalSource = fs.readFileSync(path.join(ROOT, 'src', 'ui', 'terminal.js'), 'utf8');
+const indexHtml = fs.readFileSync(path.join(ROOT, 'src', 'ui', 'index.html'), 'utf8');
 
 /** Load ui/commands.js the way the page does, and return its factory. */
 function loadFactory() {

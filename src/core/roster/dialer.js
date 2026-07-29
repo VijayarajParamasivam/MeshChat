@@ -8,12 +8,8 @@
  * or a running Tor anywhere in sight. The actual dialling is injected.
  */
 
-const tor = require('../tor');
-const {
-  DIAL_STAGGER_MS,
-  FIRST_BACKOFF_MS,
-  MAX_BACKOFF_MS,
-} = require('./constants');
+const Endpoint = require('../../models/endpoint');
+const { DIAL_STAGGER_MS, FIRST_BACKOFF_MS, MAX_BACKOFF_MS } = require('./constants');
 
 /** Turn a failed dial into something a human can act on. */
 function explainDialFailure(endpoint, error) {
@@ -43,7 +39,7 @@ function explainDialFailure(endpoint, error) {
  * moment of use. An address that somehow got stored can still never be dialled.
  */
 function orderEndpoints(endpoints = [], ownOnion = null) {
-  return (endpoints || []).filter((e) => tor.isOnion(e.host) && e.host !== ownOnion);
+  return (endpoints || []).filter((e) => Endpoint.isDialable(e, ownOnion));
 }
 
 /**

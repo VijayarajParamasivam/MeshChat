@@ -1,10 +1,11 @@
 'use strict';
 
 /**
- * The port friends dial on the onion. Virtual — it exists only inside Tor, so it
- * never has to be free on this machine and is the same for everybody.
+ * The onion port belongs to the Endpoint model — it is a fact about addresses,
+ * not about the engine's timing. Re-exported here so callers have one place to
+ * look for everything the roster is configured by.
  */
-const ONION_PORT = 47777;
+const { ONION_PORT, MAX_ENDPOINTS } = require('../../models/endpoint');
 
 const REDIAL_INTERVAL_MS = 30000;
 const MAX_BACKOFF_MS = 300000;
@@ -16,9 +17,6 @@ const DIAL_STAGGER_MS = 2000;
  * would abandon connections that were about to succeed.
  */
 const DIAL_TIMEOUT_MS = 90000;
-
-/** How many addresses to remember per friend. They almost always have one. */
-const MAX_ENDPOINTS = 4;
 
 module.exports = {
   ONION_PORT,

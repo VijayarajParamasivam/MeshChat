@@ -11,10 +11,7 @@
  * message it already has and simply re-acknowledges it.
  */
 
-const c = require('../crypto');
-
-const MAX_BODY = 4000;
-const MAX_ID = 64;
+const Message = require('../../models/message');
 
 class Messenger {
   /**
@@ -37,16 +34,10 @@ class Messenger {
 
   /** Write a message, hand it over if we can, and keep it until acknowledged. */
   compose(peerId, body) {
-    const message = {
-      id: c.messageId(),
-      ts: Date.now(),
-      body: String(body).slice(0, MAX_BODY),
-      mine: true,
-      state: 'queued',
-    };
+    const message = Message.compose(body);
     this.store.appendMessage(peerId, message);
 
-    if (this._deliver(peerId, message)) message.state = 'sent';
+    if (this._deliver(peerId, message)) message.state = Message.State.SENT;
     return message;
   }
 
@@ -56,47 +47,32 @@ class Messenger {
    */
   _deliver(peerId, message) {
     const link = this._linkFor(peerId);
-    if (!link) return false;
-
-    const written = link.send({
-      t: 'msg',
-      id: message.id,
-      ts: message.ts,
-      body: message.body,
-    });
-    if (!written) return false;
+    if (!link || !link.send(Message.toFrame(message))) return false;
 
     // "Sent" means the bytes were accepted for writing, nothing more. It stays
     // in the outbox until an ack arrives, so a circuit that dies in transit
     // costs a retry rather than the message.
-    this.store.updateMessage(peerId, message.id, { state: 'sent' }, true);
+    this.store.updateMessage(peerId, message.id, { state: Message.State.SENT }, true);
     return true;
+  }
+
+  _ack(peerId, id) {
+    this._linkFor(peerId)?.send({ t: 'ack', id });
   }
 
   /** A message arrived from a friend. */
   receive(peerId, friend, frame) {
-    const id = String(frame.id || c.messageId()).slice(0, MAX_ID);
-    const link = this._linkFor(peerId);
+    const id = Message.idFrom(frame.id);
 
     // The sender retries anything it has no ack for, so the same message
     // legitimately arrives twice whenever an ack was the thing that got lost.
     // Re-acknowledge it — that is what they are waiting for — but do not file
     // or display it again.
-    if (this.store.hasMessage(peerId, id)) {
-      if (link) link.send({ t: 'ack', id });
-      return;
-    }
+    if (this.store.hasMessage(peerId, id)) return this._ack(peerId, id);
 
-    const message = {
-      id,
-      ts: Number(frame.ts) || Date.now(),
-      body: String(frame.body || '').slice(0, MAX_BODY),
-      mine: false,
-      state: 'received',
-    };
-
+    const message = Message.fromFrame(frame, id);
     this.store.appendMessage(peerId, message);
-    if (link) link.send({ t: 'ack', id: message.id });
+    this._ack(peerId, message.id);
     this.emit('message', { peerId, name: friend.name, message });
   }
 
@@ -104,7 +80,8 @@ class Messenger {
   acknowledge(peerId, frame) {
     // Only ever our own outgoing messages: an ack names an ID the peer got
     // from us, so matching one of theirs would be a collision, not a receipt.
-    const updated = this.store.updateMessage(peerId, String(frame.id), { state: 'delivered' }, true);
+    const patch = { state: Message.State.DELIVERED };
+    const updated = this.store.updateMessage(peerId, String(frame.id), patch, true);
     if (updated) this.emit('delivered', { peerId, id: updated.id });
   }
 
@@ -137,4 +114,4 @@ class Messenger {
   }
 }
 
-module.exports = { Messenger, MAX_BODY };
+module.exports = { Messenger };

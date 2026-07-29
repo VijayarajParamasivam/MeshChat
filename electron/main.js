@@ -87,7 +87,7 @@ function createWindow() {
     },
   });
 
-  win.loadFile(path.join(__dirname, '..', 'ui', 'index.html'));
+  win.loadFile(path.join(__dirname, '..', 'src', 'ui', 'index.html'));
 }
 
 app.whenReady().then(() => {

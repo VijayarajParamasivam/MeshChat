@@ -150,7 +150,7 @@ while the same marker written four seconds later arrived in 380 ms.
 So the handshake is **ordered**: whoever dialled speaks first, and the side that
 accepted stays quiet until spoken to. It is symmetric in content, not in timing.
 `Link._sendHello` in `src/core/transport.js` carries the measurement, and
-`test/regressions.js` pins the rule.
+`test/core/transport.js` pins the rule.
 
 ## Why onion services
 
@@ -284,14 +284,22 @@ npm test
 ```
 
 No setup beyond `npm install` — the engine and its tests use only Node built-ins,
-and none of them need Tor running.
+and none of them need Tor running. 20 suites, ~400 assertions.
+
+Every suite sits at the mirror of the file it covers, so there is never a
+question of where a test belongs or whether one exists:
 
 | Suite | Covers |
 | --- | --- |
-| `test/crypto-and-transport.js` | Identity derivation, signature forgery, tampered payloads, card validation, a full two-peer handshake |
-| `test/tor.js` | The SOCKS5 client's exact wire bytes, onion validation, the control-port parser, every privacy invariant above |
-| `test/regressions.js` | One case per bug that has shipped, each naming the wrong behaviour it pins down |
-| `test/ui.js` | The command table, loaded in a vm sandbox — including that every engine method the UI calls actually exists in `main.js` |
+| `test/models/*.js` | The domain entities: name clamping, the onion-only address rule, message delivery states, which of two cards wins |
+| `test/core/crypto.js` | Identity derivation, signature forgery, key agreement, tampered payloads |
+| `test/core/card.js` | Contact codes: round trips, four kinds of forgery, malformed input, freshness |
+| `test/core/identity.js` | Key generation, profile edits, and a backup that restores your address as well as your name |
+| `test/core/store.js` | The outbox, direction-scoped message IDs, the droppable cache |
+| `test/core/transport.js` | A full two-peer handshake over a real socket, who speaks first, bound proofs |
+| `test/core/tor/*.js` | The SOCKS5 client's exact wire bytes, the control-port parser, binary discovery, onion validation |
+| `test/core/roster/*.js` | Retry policy, address racing, the friend list, delivery, and every privacy invariant above |
+| `test/ui/*.js` | The command table in a vm sandbox — including that every engine method the UI calls actually exists in `main.js` |
 
 `scripts/check-tor-pins.js` runs in CI and checks the pinned Tor checksums against
 the Tor Project's release manifest. A network failure skips rather than fails —
@@ -321,12 +329,19 @@ extra resource. Other targets are not configured yet.
 
 ### Layout
 
-Each module owns one concern, and the two directories exist because their
+`src/models/` holds the domain entities — the shapes that travel between layers,
+each owning its own validation. `src/core/` is the machinery that moves them
+around. Each module owns one concern, and the directories exist because the
 subject matter genuinely splits along those lines rather than by size.
 
 ```
 electron/main.js            app lifecycle, IPC, engine ownership
 electron/preload.js         the only bridge to the UI
+
+src/models/profile.js       a display name and sigil, clamped
+src/models/endpoint.js      an address — and the rule that only onions count
+src/models/friend.js        someone you know, and which card wins
+src/models/message.js       a message and its delivery states
 
 src/core/crypto.js          signing, key agreement, sealed frames
 src/core/identity.js        key generation, TorChat ID derivation
@@ -344,14 +359,22 @@ src/core/roster/friends.js  who you know, and their addresses
 src/core/roster/dialer.js   what to dial, in what order, and when to retry
 src/core/roster/messages.js the delivery contract: send, ack, resend
 
-ui/commands.js              every slash command, as data
-ui/terminal.js              the CRT terminal: output, input, events
+src/ui/commands.js          every slash command, as data
+src/ui/terminal.js          the CRT terminal: output, input, events
 
 scripts/get-tor.js          fetches and verifies Tor at install time
 scripts/check-tor-pins.js   verifies the pinned checksums against the manifest
 scripts/second-instance.js  launches a second profile
-test/                       the suites above
+scripts/run-tests.js        discovers and runs every suite
+scripts/harness.js          the shared assertion helper
 ```
+
+`test/` mirrors `src/` exactly: `test/core/tor/socks.js` covers
+`src/core/tor/socks.js`, one suite per source file, twenty for twenty, with
+nothing else in the tree. The test tooling lives in `scripts/` with the rest of
+the tooling, which is what keeps that true — the runner can then compare the two
+trees as a plain set difference and report both a source nobody tests and a
+suite whose source has gone.
 
 ## Troubleshooting
 
