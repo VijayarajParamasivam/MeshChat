@@ -95,10 +95,18 @@ function installHint() {
       '     and point TorChat at it:  set TORCHAT_TOR=C:\\path\\to\\tor.exe',
     ];
   }
+  // The override matters most on the platforms with no bundled build — ARM
+  // Linux has no expert bundle to download, so the package manager plus
+  // TORCHAT_TOR is the only route, and this hint is where somebody stuck will
+  // look for it.
   return [
     'Tor is not installed. Install it with your package manager:',
     '  apt install tor      (Debian/Ubuntu)',
     '  brew install tor     (macOS)',
+    '',
+    'If it lands somewhere TorChat does not look, point it there:',
+    '  export TORCHAT_TOR=/usr/bin/tor',
+    '',
     'Then restart TorChat.',
   ];
 }

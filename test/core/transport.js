@@ -61,27 +61,27 @@ run(async () => {
 
   // --- a full handshake over a real socket ---------------------------------
 
-  let server;
+  // The inbound link is settled from the connection handler, so its promise has
+  // to exist before the listener does. Waiting a fixed 50ms for `listen` to
+  // resolve instead of awaiting it read `server` before it was assigned on any
+  // machine slow enough to take longer — which is every cold CI runner.
+  let arrived;
   const inbound = new Promise((resolve, reject) => {
-    setTimeout(() => reject(new Error('server link never became ready')), 10000);
-    transport
-      .listen(0, '127.0.0.1', () => a.ctx, (link) => {
-        link.once('ready', () => {
-          link.on('message', (frame) => {
-            if (frame.t === 'msg') link.send({ t: 'msg', id: 'r', body: `echo:${frame.body}` });
-          });
-          resolve(link);
-        });
-        link.once('failed', reject);
-      })
-      .then((s) => {
-        server = s;
-        check('listener binds loopback only', s.address().address === '127.0.0.1');
-      })
-      .catch(reject);
+    arrived = { resolve, reject };
+    setTimeout(() => reject(new Error('server link never became ready')), 10000).unref();
   });
 
-  await new Promise((r) => setTimeout(r, 50));
+  const server = await transport.listen(0, '127.0.0.1', () => a.ctx, (link) => {
+    link.once('ready', () => {
+      link.on('message', (frame) => {
+        if (frame.t === 'msg') link.send({ t: 'msg', id: 'r', body: `echo:${frame.body}` });
+      });
+      arrived.resolve(link);
+    });
+    link.once('failed', arrived.reject);
+  });
+
+  check('listener binds loopback only', server.address().address === '127.0.0.1');
   const port = server.address().port;
 
   const raw = net.createConnection({ host: '127.0.0.1', port });

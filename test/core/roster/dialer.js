@@ -146,7 +146,13 @@ run(async () => {
     });
 
     check('the address that answers first wins', won === quick);
-    await new Promise((r) => setTimeout(r, 1200));
+
+    // Wait for the straggler to land rather than guessing how long it takes.
+    // A fixed sleep here is a coin flip on a loaded machine.
+    const deadline = Date.now() + 8000;
+    while (!slow.closed && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
     check('and the straggler is closed', slow.closed === true);
   }
 
