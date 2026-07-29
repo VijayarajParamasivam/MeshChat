@@ -23,7 +23,7 @@ jobs:
       # Electron is a devDependency of the desktop shell, not of the tests.
       - name: Check every file parses
         run: |
-          for file in electron/*.js scripts/*.js src/core/*.js test/*.js ui/terminal.js; do
+          for file in electron/*.js scripts/*.js src/core/*.js src/core/*/*.js test/*.js ui/*.js; do
             node --check "$file"
           done
 

@@ -148,32 +148,6 @@ function describeTor(t) {
 
 // --- commands -------------------------------------------------------------
 
-const HELP = [
-  '  /help              this list',
-  '  /who               your handle, id and data directory',
-  '  /me <name>         change your display name',
-  '  /sigil <char>      change your one-character sigil',
-  '',
-  '  /card              print your contact code',
-  '  /copy              copy your contact code to the clipboard',
-  '  /add <code>        add a friend from their code',
-  '  /paste             add a friend from a code already on your clipboard',
-  '  /forget <who>      remove a friend',
-  '',
-  '  /friends           who you know and who is online',
-  '  /chat <who>        open a conversation',
-  '  /leave             close the conversation',
-  '',
-  '  /tor               your onion address and whether it is reachable',
-  '  /try <who>         force a connection attempt and show why it failed',
-  '  /export            write an identity backup file',
-  '  /import <path>     restore an identity backup',
-  '  /clear             wipe the screen',
-  '  /quit              exit',
-  '',
-  '  anything else is sent to whoever you are chatting with.',
-];
-
 async function openChat(query) {
   const found = await call('resolve', query);
   if (!found) {
@@ -194,182 +168,38 @@ async function openChat(query) {
   line('');
 }
 
+/**
+ * The command table, built once with everything a command might need.
+ *
+ * Commands are looked up here rather than branched on in a switch, so the
+ * listing /help prints and the set of things that actually run cannot disagree.
+ */
+const commands = window.createCommands({
+  call,
+  line,
+  sys,
+  err,
+  state,
+  openChat,
+  promptSymbol,
+  clearLog: () => logEl.replaceChildren(),
+});
+
+for (const command of commands) command.all = commands;
+const byName = new Map(commands.map((command) => [command.name, command]));
+
 async function runCommand(raw) {
-  const [command, ...rest] = raw.slice(1).split(/\s+/);
-  const arg = raw.slice(1).slice(command.length).trim();
+  const [word] = raw.slice(1).split(/\s+/);
+  const arg = raw.slice(1).slice(word.length).trim();
 
-  switch (command.toLowerCase()) {
-    case 'help':
-      line('');
-      for (const row of HELP) line(row, 'sys');
-      line('');
-      return;
+  const command = byName.get(word.toLowerCase());
+  if (!command) return err(`unknown command /${word} — /help`);
 
-    case 'who': {
-      const boot = await call('boot');
-      sys(`${boot.profile.sigil} ${boot.profile.name}  ${boot.profile.id}`);
-      sys(`data ${boot.dataDir}`);
-      return;
-    }
-
-    case 'me': {
-      if (!arg) return err('usage: /me <name>');
-      const profile = await call('setProfile', { name: arg });
-      state.profile = profile;
-      sys(`you are now ${profile.name}`);
-      return;
-    }
-
-    case 'sigil': {
-      if (!arg) return err('usage: /sigil <char>');
-      const profile = await call('setProfile', { sigil: arg });
-      state.profile = profile;
-      sys(`sigil set to ${profile.sigil}`);
-      return;
-    }
-
-    case 'card': {
-      const code = await call('card');
-      line('');
-      sys('send this to a friend over any channel you like:');
-      line(code, 'hot');
-      line('');
-      sys('they run /add <code>. only one of you needs to do it.');
-      return;
-    }
-
-    case 'copy': {
-      await call('copy', await call('card'));
-      sys('contact code copied to clipboard');
-      return;
-    }
-
-    case 'add': {
-      if (!arg) return err('usage: /add <code or torchat id>');
-      sys('verifying and dialling...');
-      const friend = await call('addFriend', arg);
-      sys(`${friend.name} added — /chat ${friend.name}`);
-      return;
-    }
-
-    case 'paste': {
-      const text = await call('paste');
-      if (!text) return err('clipboard is empty');
-      sys('verifying and dialling...');
-      const friend = await call('addFriend', text);
-      sys(`${friend.name} added — /chat ${friend.name}`);
-      return;
-    }
-
-    case 'forget': {
-      if (!arg) return err('usage: /forget <who>');
-      const found = await call('resolve', arg);
-      if (!found) return err(`no single match for "${arg}"`);
-      await call('removeFriend', found.id);
-      if (state.active?.id === found.id) state.active = null;
-      promptSymbol();
-      sys(`forgot ${found.name}`);
-      return;
-    }
-
-    case 'friends': {
-      const friends = await call('friends');
-      if (!friends.length) return sys('nobody yet. /card to get your code.');
-      line('');
-      for (const friend of friends) {
-        line(
-          `  ${friend.online ? '[online] ' : '[   off] '}${friend.sigil} ${friend.name.padEnd(14)} ${friend.id}`,
-          friend.online ? 'hot' : 'sys'
-        );
-      }
-      line('');
-      return;
-    }
-
-    case 'chat': {
-      if (!arg) return err('usage: /chat <name or torchat id>');
-      await openChat(arg);
-      return;
-    }
-
-    case 'leave':
-      state.active = null;
-      promptSymbol();
-      sys('conversation closed');
-      return;
-
-    case 'tor': {
-      const t = await call(`tor`);
-      line('');
-      sys(`onion    ${t.onion || 'not published yet'}`);
-      sys(`status   ${t.running ? (t.published ? 'published and reachable' : 'published, still propagating') : 'not running'}`);
-      sys(`tor      ${t.binary || 'not found'}`);
-      sys(`friends  ${t.friends} known, ${t.online} online`);
-      line('');
-      if (!t.running) {
-        line('  tor is not running, so nothing can connect. restart torchat.', 'err');
-      } else if (!t.published) {
-        line('  the descriptor is still reaching the directory. give it a minute.', 'sys');
-      } else {
-        line('  friends can reach you at that address from anywhere.', 'hot');
-        line('  no ip of yours is published, sent or dialled — only this.', 'sys');
-      }
-      line('');
-      return;
-    }
-
-    case 'try': {
-      if (!arg) return err('usage: /try <who>');
-      sys(`building a circuit to ${arg} — this takes a few seconds...`);
-      const result = await call('probe', arg);
-
-      if (result.alreadyOnline) return sys(`${result.name} is already connected`);
-
-      line('');
-      sys(`onion addresses on record for ${result.name}:`);
-      if (!result.endpoints.length) line('  (none — their card had no onion address)', 'err');
-      for (const e of result.endpoints) line(`  ${e.host}:${e.port}`, 'sys');
-
-      line('');
-      if (result.ok) {
-        line(`  connected to ${result.name}.`, 'hot');
-      } else {
-        for (const reason of result.reasons) line(`  ${reason}`, 'err');
-        line('', 'sys');
-        line('  an onion answers only while their torchat is open. there is no', 'sys');
-        line('  firewall or router involved on either side — if this fails, they', 'sys');
-        line('  are almost certainly not running it.', 'sys');
-      }
-      line('');
-      return;
-    }
-
-    case 'export': {
-      const file = await call('exportIdentity');
-      sys(`identity written to ${file}`);
-      line('  anyone holding that file can be you. guard it.', 'err');
-      return;
-    }
-
-    case 'import': {
-      if (!arg) return err('usage: /import <path to backup file>');
-      const profile = await call('importIdentity', arg);
-      state.profile = profile;
-      sys(`identity restored: ${profile.name} ${profile.id}`);
-      return;
-    }
-
-    case 'clear':
-      logEl.replaceChildren();
-      return;
-
-    case 'quit':
-      window.close();
-      return;
-
-    default:
-      err(`unknown command /${command} — /help`);
+  if (command.arg && !arg) {
+    return err(`usage: ${command.usage || `/${command.name} ${command.arg}`}`);
   }
+
+  return command.run(arg);
 }
 
 async function submit(raw) {

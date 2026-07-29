@@ -32,7 +32,7 @@
     "start": "electron .",
     "build": "electron-builder --win",
     "start:b": "node scripts/second-instance.js",
-    "test": "node test/crypto-and-transport.js && node test/tor.js && node test/regressions.js",
+    "test": "node test/crypto-and-transport.js && node test/tor.js && node test/regressions.js && node test/ui.js",
     "postinstall": "node scripts/get-tor.js",
     "get-tor": "node scripts/get-tor.js"
   },

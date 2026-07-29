@@ -26,6 +26,10 @@
          green block above renders the authentic terminal caret. -->
     <input id="capture" autocomplete="off" autocorrect="off" spellcheck="false" />
 
+    <!-- commands.js first: it defines the table terminal.js builds its
+         dispatcher from. Classic scripts, not modules — the renderer is served
+         from file://, where module scripts are blocked as cross-origin. -->
+    <script src="commands.js"></script>
     <script src="terminal.js"></script>
   </body>
 </html>

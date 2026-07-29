@@ -291,6 +291,7 @@ and none of them need Tor running.
 | `test/crypto-and-transport.js` | Identity derivation, signature forgery, tampered payloads, card validation, a full two-peer handshake |
 | `test/tor.js` | The SOCKS5 client's exact wire bytes, onion validation, the control-port parser, every privacy invariant above |
 | `test/regressions.js` | One case per bug that has shipped, each naming the wrong behaviour it pins down |
+| `test/ui.js` | The command table, loaded in a vm sandbox — including that every engine method the UI calls actually exists in `main.js` |
 
 `scripts/check-tor-pins.js` runs in CI and checks the pinned Tor checksums against
 the Tor Project's release manifest. A network failure skips rather than fails —
@@ -320,21 +321,36 @@ extra resource. Other targets are not configured yet.
 
 ### Layout
 
+Each module owns one concern, and the two directories exist because their
+subject matter genuinely splits along those lines rather than by size.
+
 ```
-electron/main.js          app lifecycle, IPC, engine ownership
-electron/preload.js       the only bridge to the UI
-src/core/crypto.js        signing, key agreement, sealed frames
-src/core/identity.js      key generation, TorChat ID derivation
-src/core/card.js          signed contact codes
-src/core/tor.js           tor process, onion service, control port, SOCKS5 dialler
-src/core/transport.js     framing, handshake, encrypted channel
-src/core/roster.js        the engine: friends, links, messages
-src/core/store.js         identity, friends and history on disk
-scripts/get-tor.js        fetches and verifies Tor at install time
-scripts/check-tor-pins.js verifies the pinned checksums against the manifest
+electron/main.js            app lifecycle, IPC, engine ownership
+electron/preload.js         the only bridge to the UI
+
+src/core/crypto.js          signing, key agreement, sealed frames
+src/core/identity.js        key generation, TorChat ID derivation
+src/core/card.js            signed contact codes
+src/core/transport.js       framing, handshake, encrypted channel
+src/core/store.js           identity, friends and history on disk
+
+src/core/tor/index.js       the tor process and its onion service
+src/core/tor/locate.js      finding a tor binary to drive
+src/core/tor/control.js     the control-port protocol
+src/core/tor/socks.js       the SOCKS5 dialler
+
+src/core/roster/index.js    the engine: lifecycle and wiring
+src/core/roster/friends.js  who you know, and their addresses
+src/core/roster/dialer.js   what to dial, in what order, and when to retry
+src/core/roster/messages.js the delivery contract: send, ack, resend
+
+ui/commands.js              every slash command, as data
+ui/terminal.js              the CRT terminal: output, input, events
+
+scripts/get-tor.js          fetches and verifies Tor at install time
+scripts/check-tor-pins.js   verifies the pinned checksums against the manifest
 scripts/second-instance.js  launches a second profile
-ui/                       the CRT terminal
-test/                     the suites above
+test/                       the suites above
 ```
 
 ## Troubleshooting
