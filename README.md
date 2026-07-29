@@ -61,6 +61,13 @@ It is also slower. A circuit takes seconds to build where a direct dial took
 milliseconds, including to a laptop in the same room. That was the deliberate
 choice: one path that always works beats six that sometimes do.
 
+**One rule the transport imposes.** Tor discards anything an onion service writes
+into a rendezvous stream before the dialler's end of it is joined — silently,
+with the write reporting success. So the handshake is ordered: whoever dialled
+speaks first, and the side that accepted stays quiet until spoken to. It is
+symmetric in content, not in timing. `Link._sendHello` in `src/core/transport.js`
+carries the measurement, and `test/regressions.js` pins the rule.
+
 ## Using it
 
 To add a friend, run `/card`, send the code however you like, and they run

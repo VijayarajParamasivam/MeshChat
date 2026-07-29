@@ -37,13 +37,33 @@ const HANDSHAKE_TIMEOUT_MS = 45000;
 const PING_INTERVAL_MS = 20000;
 const PING_TIMEOUT_MS = 60000;
 
+/**
+ * What a proof actually signs.
+ *
+ * Signing the bare nonce made the signature a free-floating assertion that said
+ * nothing about who produced it or who it was for — valid in any context that
+ * happened to present the same bytes. Naming the protocol, the signer and the
+ * intended recipient makes it answer exactly one question: "did this identity
+ * prove itself to that identity, in this handshake?"
+ */
+const PROOF_CONTEXT = 'torchat-proof-v1';
+
+function proofPayload(nonce, signerId, recipientId) {
+  return `${PROOF_CONTEXT}|${nonce}|${signerId}|${recipientId}`;
+}
+
 class Link extends EventEmitter {
   /**
    * @param {net.Socket} socket
    * @param {object} ctx      { identity, keys, cardCode }
-   * @param {object} options  { expectId } when we dialled a specific friend
+   * @param {object} options  { expectId } when we dialled a specific friend,
+   *                          { handshakeTimeoutMs } to match the caller's budget
    */
-  constructor(socket, ctx, { expectId = null } = {}) {
+  constructor(
+    socket,
+    ctx,
+    { expectId = null, handshakeTimeoutMs = HANDSHAKE_TIMEOUT_MS, greetFirst = true } = {}
+  ) {
     super();
     this.socket = socket;
     this.ctx = ctx;
@@ -52,6 +72,7 @@ class Link extends EventEmitter {
     this.peer = null;
     this.ready = false;
     this.closed = false;
+    this.greeted = false;
 
     this.channelKey = null;
     this.myNonce = c.nonce();
@@ -68,9 +89,33 @@ class Link extends EventEmitter {
 
     this.handshakeTimer = setTimeout(() => {
       if (!this.ready) this._fail('handshake timed out');
-    }, HANDSHAKE_TIMEOUT_MS);
+    }, handshakeTimeoutMs);
 
-    this._sendPlain({ t: 'hello', card: ctx.cardCode, nonce: this.myNonce });
+    // Only the side that dialled may speak first. See _sendHello.
+    if (greetFirst) this._sendHello();
+  }
+
+  /**
+   * Send our opening frame, exactly once.
+   *
+   * The side that *accepted* the connection must not send this until the dialler
+   * has been heard from, and that is not a style preference — it is a hard
+   * property of the transport. Tor discards anything an onion service writes
+   * into a rendezvous stream before the CONNECTED cell reaches the other end,
+   * silently and with no error on the writing side. Measured: a 120-byte marker
+   * written on accept never arrived, while the same marker written four seconds
+   * later arrived in 380ms.
+   *
+   * The old code greeted from the constructor on both sides, so the responder's
+   * hello was destroyed every single time. What survived was its `proof`, sent
+   * afterwards in reply to the dialler's hello — which is why every connection
+   * over Tor died with "proof arrived before hello". The handshake is still
+   * symmetric in content; only the responder's timing has changed.
+   */
+  _sendHello() {
+    if (this.greeted) return;
+    this.greeted = true;
+    this._sendPlain({ t: 'hello', card: this.ctx.cardCode, nonce: this.myNonce });
   }
 
   // --- framing ------------------------------------------------------------
@@ -135,6 +180,13 @@ class Link extends EventEmitter {
     if (frame.t === 'hello') {
       if (this.peer) return this._fail('peer said hello twice');
 
+      // A nonce we never validated was signed as the string "undefined", which
+      // is the same challenge for every peer that omits it — the one input to
+      // the proof that must not be attacker-chosen or constant.
+      if (typeof frame.nonce !== 'string' || frame.nonce.length < 16) {
+        return this._fail('peer sent no usable challenge');
+      }
+
       const parsed = card.parse(frame.card);
 
       if (this.expectId && parsed.id !== this.expectId) {
@@ -147,9 +199,17 @@ class Link extends EventEmitter {
       this.peer = parsed;
       this.channelKey = c.deriveChannelKey(this.ctx.keys.boxPrivate, parsed.box);
 
+      // Now it is safe to speak: hearing from them proves the stream is joined
+      // end to end, so this will actually be delivered. Hello before proof —
+      // they cannot check a proof from someone who has not identified themselves.
+      this._sendHello();
+
       this._sendPlain({
         t: 'proof',
-        sig: c.sign(this.ctx.keys.signPrivate, frame.nonce),
+        sig: c.sign(
+          this.ctx.keys.signPrivate,
+          proofPayload(frame.nonce, this.ctx.identity.id, parsed.id)
+        ),
       });
       this.weProved = true;
       this._maybeReady();
@@ -158,7 +218,8 @@ class Link extends EventEmitter {
 
     if (frame.t === 'proof') {
       if (!this.peer) return this._fail('proof arrived before hello');
-      if (!c.verify(this.peer.sign, this.myNonce, frame.sig)) {
+      const expected = proofPayload(this.myNonce, this.peer.id, this.ctx.identity.id);
+      if (!c.verify(this.peer.sign, expected, frame.sig)) {
         return this._fail('peer could not prove it owns that ID');
       }
       this.theyProved = true;
@@ -234,7 +295,10 @@ class Link extends EventEmitter {
 function listen(port, host, getCtx, onLink) {
   return new Promise((resolve, reject) => {
     const server = net.createServer((socket) => {
-      onLink(new Link(socket, getCtx()));
+      // greetFirst: false — we accepted, so we wait to be spoken to. Greeting
+      // here would write into a rendezvous stream Tor has not finished joining,
+      // and the frame would be dropped without a word. See Link._sendHello.
+      onLink(new Link(socket, getCtx(), { greetFirst: false }));
     });
 
     server.once('error', reject);
@@ -244,6 +308,12 @@ function listen(port, host, getCtx, onLink) {
     // the address the onion exists to keep private.
     server.listen(port, host, () => {
       server.removeListener('error', reject);
+
+      // Something must stay attached. A server error after bind — EMFILE under
+      // load is the realistic one — is an unheard 'error' event, and an unheard
+      // 'error' event takes the whole process down rather than logging.
+      server.on('error', (err) => server.emit('listen-error', err));
+
       resolve(server);
     });
   });
@@ -252,11 +322,12 @@ function listen(port, host, getCtx, onLink) {
 /**
  * Run the handshake over an already-connected stream.
  *
- * A Tor circuit arrives already open — there is no connect step to wait for —
- * and `Link` is deliberately symmetric: both ends send `hello` and both answer
- * with `proof`, so neither has to be designated the caller. That is what lets
- * two peers who dialled each other at once end up with one working channel
- * rather than a deadlock.
+ * A Tor circuit arrives already open — there is no connect step to wait for.
+ * `Link` stays symmetric in content: both ends send `hello` and both answer with
+ * `proof`, so two peers who dialled each other at once still end up with one
+ * working channel rather than a deadlock. Only the ordering is asymmetric, and
+ * only because Tor forces it: the dialler speaks first, and the side that
+ * accepted answers. See Link._sendHello for why.
  */
 function overStream(stream, ctx, expectId = null, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
@@ -276,7 +347,11 @@ function overStream(stream, ctx, expectId = null, timeoutMs = 12000) {
     };
 
     const timer = setTimeout(() => fail(`handshake stalled after ${timeoutMs}ms`, 'ETIMEDOUT'), timeoutMs);
-    const link = new Link(stream, ctx, { expectId });
+
+    // The Link gets the caller's budget too. With its own fixed 45s it always
+    // fired first over Tor, so a caller asking for 90s silently got 45 and a
+    // handshake that was merely slow across six relays was reported as failed.
+    const link = new Link(stream, ctx, { expectId, handshakeTimeoutMs: timeoutMs });
 
     link.once('ready', () => {
       if (settled) return;

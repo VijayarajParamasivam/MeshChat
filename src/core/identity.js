@@ -76,12 +76,20 @@ function setProfile({ name, sigil }) {
 }
 
 /**
- * Back up the whole identity, private keys included. Anyone holding this file
- * can be you, so it never leaves the machine unless the user moves it.
+ * Back up everything that cannot be regenerated. Anyone holding this file can be
+ * you, so it never leaves the machine unless the user moves it.
+ *
+ * The onion key belongs in here as much as the signing key does. It lives in
+ * settings rather than in the identity record because it is a different kind of
+ * secret, but a "backup" that restored your name and lost your address would be
+ * the worse half: every friend's saved card points at the onion, and an onion is
+ * derived from this key alone. Leaving it out meant a restored identity was
+ * unreachable by everyone who already knew you.
  */
 function exportBackup() {
   if (!current) throw new Error('no identity loaded');
-  return JSON.stringify({ torchat: 1, identity: current }, null, 2);
+  const { onionKey } = store.readSettings();
+  return JSON.stringify({ torchat: 1, identity: current, onionKey: onionKey || null }, null, 2);
 }
 
 function importBackup(json) {
@@ -95,7 +103,22 @@ function importBackup(json) {
     throw new Error('backup is corrupt: ID does not match its key');
   }
 
+  // Prove the private half actually goes with the public one before adopting
+  // it, rather than discovering it at the first handshake.
+  try {
+    const probe = c.sign(c.importPrivate(record.sign.private), 'torchat-backup-check');
+    if (!c.verify(record.sign.public, 'torchat-backup-check', probe)) throw new Error();
+    c.importPrivate(record.box.private);
+  } catch {
+    throw new Error('backup is corrupt: the private key does not match its public half');
+  }
+
   store.writeIdentity(record);
+
+  // Older backups predate this and simply have no onion key; that restores the
+  // old behaviour of a fresh address rather than failing the import.
+  if (parsed.onionKey) store.writeSettings({ onionKey: parsed.onionKey });
+
   return hydrate(record);
 }
 

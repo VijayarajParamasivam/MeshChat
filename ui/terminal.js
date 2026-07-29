@@ -52,13 +52,37 @@ function paintMessage(el, name, message) {
   el.textContent = `[${clock(message.ts)}] <${name}> ${message.body}${mark}`;
 }
 
+/**
+ * Every rendering of a message, indexed by ID.
+ *
+ * A message can be on screen more than once — reopening a conversation reprints
+ * history above the earlier copy. Using the ID as a DOM id made those duplicates
+ * illegal HTML, and getElementById then returned the *oldest* one, so a delivery
+ * receipt ticked a line that had scrolled away while the visible one sat unmarked.
+ */
+const rendered = new Map();
+
 function showMessage(name, message) {
   const el = line('', message.mine ? 'me' : 'them');
-  el.id = `m-${message.id}`;
+  el.dataset.messageId = message.id;
   el.dataset.name = name;
   el.dataset.state = message.state;
   paintMessage(el, name, message);
+
+  if (message.mine) {
+    const shown = rendered.get(message.id) || [];
+    shown.push(el);
+    rendered.set(message.id, shown);
+  }
   return el;
+}
+
+/** Mark every copy of one of our messages as delivered. */
+function markDelivered(id) {
+  for (const el of rendered.get(id) || []) {
+    if (el.isConnected) el.textContent = el.textContent.replace(/ \[(~|>)\]$/, '') + ' [ok]';
+    el.dataset.state = 'delivered';
+  }
 }
 
 function banner() {
@@ -357,6 +381,10 @@ async function submit(raw) {
     line(`> handle: ${text}`, 'me');
     line('');
     await enterReady({ ...created, friends: [] });
+    if (created.error) {
+      err(`the engine did not start: ${created.error}`);
+      sys('your identity is saved. fix the above and restart torchat.');
+    }
     return;
   }
 
@@ -451,11 +479,31 @@ window.torchat.on('torchat:message', ({ peerId, name, message }) => {
   line(`* ${name}: ${preview}   (/chat ${name})`, 'hot');
 });
 
-window.torchat.on('torchat:delivered', ({ id }) => {
-  const el = document.getElementById(`m-${id}`);
-  if (!el) return;
-  const text = el.textContent.replace(/ \[(~|>)\]$/, '');
-  el.textContent = `${text} [ok]`;
+window.torchat.on('torchat:delivered', ({ id }) => markDelivered(id));
+
+// The engine resends anything unacknowledged when a link comes back, which
+// changes the marks on messages already on screen. Repaint the open
+// conversation rather than leaving it showing a state that is no longer true.
+window.torchat.on('torchat:history-changed', async ({ peerId }) => {
+  if (state.active?.id !== peerId) return;
+  const history = await call('history', { peerId, limit: 40 });
+  for (const message of history) {
+    if (message.state === 'delivered') markDelivered(message.id);
+  }
+});
+
+window.torchat.on('torchat:friends-changed', async () => {
+  if (!state.active) return;
+  // A friend renamed themselves, or was forgotten from elsewhere; keep the
+  // prompt honest.
+  const found = await call('resolve', state.active.id);
+  if (!found) {
+    state.active = null;
+    sys('that conversation is no longer in your friend list');
+  } else {
+    state.active = found;
+  }
+  promptSymbol();
 });
 
 window.torchat.on('torchat:status', ({ id, name, online }) => {

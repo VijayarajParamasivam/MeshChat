@@ -105,9 +105,19 @@ class TorChat extends EventEmitter {
     this.server = await transport.listen(0, '127.0.0.1', () => this._context(), (link) =>
       this._onInbound(link)
     );
+    this.server.on('listen-error', (err) => this.log(`listener error: ${err.message}`));
     this.port = this.server.address().port;
 
-    await this._startTor();
+    // If Tor cannot start there is nothing to listen for, and leaving the socket
+    // bound would leak it for the life of the process — the caller has no handle
+    // to close it, because start() never returned one.
+    try {
+      await this._startTor();
+    } catch (err) {
+      this.server.close();
+      this.server = null;
+      throw err;
+    }
 
     this.redialTimer = setInterval(() => this._redialAll(), REDIAL_INTERVAL_MS);
     this._redialAll();
@@ -126,6 +136,15 @@ class TorChat extends EventEmitter {
       onionKey: store.readSettings().onionKey || null,
     });
     this.tor.on('log', (m) => this.log(m));
+
+    // Tor dying takes every link with it. Tear them down so each friend is
+    // reported offline once, rather than looking online while every send
+    // silently fails.
+    this.tor.on('down', () => {
+      this.published = false;
+      for (const link of [...this.links.values()]) link.close();
+      this.links.clear();
+    });
 
     try {
       await this.tor.start();
@@ -246,11 +265,25 @@ class TorChat extends EventEmitter {
       this.friends.set(peer.id, friend);
     }
 
-    friend.name = peer.name;
-    friend.sigil = peer.sigil;
-    friend.sign = peer.sign;
-    friend.box = peer.box;
-    this._mergeEndpoints(friend, peer.endpoints || []);
+    // A card carries a signed timestamp, and until now nothing looked at it. An
+    // old card pasted after a newer one would quietly reinstate a dead onion
+    // ahead of the live one in the dial order. Identity is still trusted — it is
+    // proven by the key — but what the card *claims about now* is not, if we
+    // already hold something more recent.
+    const ts = Number(peer.ts) || 0;
+    const stale = !isNew && friend.cardTs && ts && ts < friend.cardTs;
+
+    if (!stale) {
+      friend.name = peer.name;
+      friend.sigil = peer.sigil;
+      friend.sign = peer.sign;
+      friend.box = peer.box;
+      if (ts) friend.cardTs = ts;
+      this._mergeEndpoints(friend, peer.endpoints || []);
+    } else {
+      // Still worth keeping as a fallback address, just not as the first choice.
+      this._mergeEndpoints(friend, [...(friend.endpoints || []), ...(peer.endpoints || [])]);
+    }
 
     this._saveFriends();
     return { friend, isNew };
@@ -325,6 +358,17 @@ class TorChat extends EventEmitter {
 
   _adopt(link) {
     const peer = link.peer;
+
+    // A link can die between 'ready' and here — the outbound path adopts a
+    // microtask after the handshake resolves. Storing a dead one was permanent:
+    // Link.close() has already emitted 'close' and dropped its listeners, so the
+    // handler registered below would never fire, the friend stayed in this.links
+    // forever, _redialAll skipped them for having a "live" link, and only a
+    // restart brought them back.
+    if (link.closed) {
+      this._backOff(peer.id);
+      return;
+    }
 
     if (this.links.has(peer.id)) {
       // Both sides dialled at once; keep the connection we already trust.
@@ -411,24 +455,44 @@ class TorChat extends EventEmitter {
     for (const reason of failures) this.log(`  ${reason}`);
   }
 
-  /** Force an immediate attempt and report everything, for /try. */
-  async probe(friendId) {
-    const friend = this.friends.get(friendId);
-    if (!friend) throw new Error('not a friend');
-    if (this.links.has(friendId)) {
-      return { ok: true, alreadyOnline: true, endpoints: friend.endpoints || [], reasons: [] };
+  /**
+   * Force an immediate attempt and report everything, for /try.
+   *
+   * Takes the same free text /chat and /forget take — a name, an ID or a
+   * fragment of one — rather than an exact ID, because that is what a person
+   * types and there is nowhere else in the UI they would get an exact ID from.
+   */
+  async probe(query) {
+    const friend = this.resolve(query) || this.friends.get(String(query || '').toUpperCase());
+    if (!friend) throw new Error(`no single match for "${query}" — try /friends`);
+
+    if (this.links.has(friend.id)) {
+      return {
+        ok: true,
+        alreadyOnline: true,
+        name: friend.name,
+        id: friend.id,
+        endpoints: this._orderEndpoints(friend.endpoints),
+        reasons: [],
+      };
     }
 
-    this.attempts.delete(friendId);
-    this.nextTry.delete(friendId);
-    this.lastFailure.delete(friendId);
+    this.attempts.delete(friend.id);
+    this.nextTry.delete(friend.id);
+    this.lastFailure.delete(friend.id);
 
     const result = (await this._connect(friend, { verbose: true })) || {
       ok: false,
       reasons: ['a connection attempt is already in progress'],
     };
 
-    return { ...result, endpoints: this._orderEndpoints(friend.endpoints) };
+    return {
+      ...result,
+      alreadyOnline: false,
+      name: friend.name,
+      id: friend.id,
+      endpoints: this._orderEndpoints(friend.endpoints),
+    };
   }
 
   /**
@@ -499,22 +563,35 @@ class TorChat extends EventEmitter {
     if (!friend) return;
 
     if (frame.t === 'msg') {
+      const id = String(frame.id || c.messageId()).slice(0, 64);
+      const link = this.links.get(peerId);
+
+      // The sender retries anything it has no ack for, so the same message
+      // legitimately arrives twice whenever an ack was the thing that got lost.
+      // Re-acknowledge it — that is what they are waiting for — but do not file
+      // or display it again.
+      if (store.hasMessage(peerId, id)) {
+        if (link) link.send({ t: 'ack', id });
+        return;
+      }
+
       const message = {
-        id: String(frame.id || c.messageId()),
+        id,
         ts: Number(frame.ts) || Date.now(),
         body: String(frame.body || '').slice(0, 4000),
         mine: false,
         state: 'received',
       };
       store.appendMessage(peerId, message);
-      const link = this.links.get(peerId);
       if (link) link.send({ t: 'ack', id: message.id });
       this.emit('message', { peerId, name: friend.name, message });
       return;
     }
 
     if (frame.t === 'ack') {
-      const updated = store.updateMessage(peerId, String(frame.id), { state: 'delivered' });
+      // Only ever our own outgoing messages: an ack names an ID the peer got
+      // from us, so matching one of theirs would be a collision, not a receipt.
+      const updated = store.updateMessage(peerId, String(frame.id), { state: 'delivered' }, true);
       if (updated) this.emit('delivered', { peerId, id: updated.id });
       return;
     }
@@ -549,14 +626,24 @@ class TorChat extends EventEmitter {
 
     const link = this.links.get(peerId);
     if (link && link.send({ t: 'msg', id: message.id, ts: message.ts, body: message.body })) {
-      store.updateMessage(peerId, message.id, { state: 'sent' });
+      // "Sent" means the bytes were accepted for writing, nothing more. It stays
+      // in the outbox until an ack arrives, so a circuit that dies in transit
+      // costs a retry rather than the message.
+      store.updateMessage(peerId, message.id, { state: 'sent' }, true);
       message.state = 'sent';
     }
 
     return message;
   }
 
-  /** Hand over anything composed while the friend was offline. */
+  /**
+   * Hand over everything the peer has not acknowledged.
+   *
+   * This runs on every fresh link, so a message that went into a circuit which
+   * then died is resent rather than lost. The peer discards a copy it already
+   * has and re-acks it, which is what makes resending safe: the only cost of a
+   * needless retry is one duplicate ack.
+   */
   _flushOutbox(peerId) {
     const link = this.links.get(peerId);
     if (!link) return;
@@ -564,12 +651,16 @@ class TorChat extends EventEmitter {
     const pending = store.undelivered(peerId);
     if (!pending.length) return;
 
+    let sent = 0;
     for (const message of pending) {
       if (link.send({ t: 'msg', id: message.id, ts: message.ts, body: message.body })) {
-        store.updateMessage(peerId, message.id, { state: 'sent' });
+        store.updateMessage(peerId, message.id, { state: 'sent' }, true);
+        sent += 1;
       }
     }
-    this.log(`flushed ${pending.length} queued message(s)`);
+    if (!sent) return;
+
+    this.log(`resent ${sent} unacknowledged message(s)`);
     this.emit('history-changed', { peerId });
   }
 

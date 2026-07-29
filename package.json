@@ -30,12 +30,30 @@
   },
   "scripts": {
     "start": "electron .",
+    "build": "electron-builder --win",
     "start:b": "node scripts/second-instance.js",
-    "test": "node test/crypto-and-transport.js && node test/tor.js",
+    "test": "node test/crypto-and-transport.js && node test/tor.js && node test/regressions.js",
     "postinstall": "node scripts/get-tor.js",
     "get-tor": "node scripts/get-tor.js"
   },
   "devDependencies": {
-    "electron": "^43.2.0"
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.torchat.torchat",
+    "productName": "TorChat",
+    "win": {
+      "target": "nsis"
+    },
+    "extraResources": [
+      {
+        "from": "vendor/tor",
+        "to": "tor",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
   }
 }

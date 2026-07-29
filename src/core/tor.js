@@ -82,8 +82,16 @@ function candidatePaths() {
 
   if (process.env.TORCHAT_TOR) list.push(process.env.TORCHAT_TOR);
 
-  // What `npm install` fetched. First choice, so a clean clone works with no
-  // setup and without depending on whatever Tor the machine happens to have.
+  // In a packaged Electron app, extraResources places files under
+  // process.resourcesPath. This must come before the dev-time __dirname
+  // path because __dirname points inside the .asar archive.
+  if (typeof process.resourcesPath === 'string') {
+    list.push(path.join(process.resourcesPath, 'tor', 'tor', exe));
+  }
+
+  // What `npm install` fetched. First choice in dev, so a clean clone works
+  // with no setup and without depending on whatever Tor the machine happens
+  // to have.
   list.push(path.join(__dirname, '..', '..', 'vendor', 'tor', 'tor', exe));
 
   if (process.platform === 'win32') {
@@ -254,8 +262,13 @@ function socksConnect(socksPort, host, port, timeoutMs = DIAL_TIMEOUT_MS) {
 
         settled = true;
         clearTimeout(timer);
-        socket.removeAllListeners('error');
-        socket.removeAllListeners('close');
+
+        // The 'readable' listener is ours alone and must go, or it would race
+        // the caller for the tunnelled bytes. The 'error' and 'close' handlers
+        // stay: both call fail(), which returns immediately now that settled is
+        // true, and leaving them means the socket is never momentarily without
+        // an 'error' listener between here and the Link that adopts it. An
+        // unheard 'error' on a socket is a thrown exception, not a no-op.
         socket.removeAllListeners('readable');
 
         resolve(socket);
@@ -282,6 +295,7 @@ class Control extends EventEmitter {
     this.socket = null;
     this.buffer = '';
     this.waiting = [];
+    this.events = new Set();
   }
 
   connect() {
@@ -310,8 +324,13 @@ class Control extends EventEmitter {
 
     // A reply ends with a line like "250 OK" — status, space, text. Continuation
     // lines use "250-" or "250+", so the space is what marks the end.
+    //
+    // The status must be anchored to the start of a line. Without the `m` flag
+    // and the second `^`, three digits followed by a space *anywhere inside* a
+    // continuation line terminated the reply early — an event line reading
+    // "...for 250 seconds" would truncate the answer and reject the caller.
     let match;
-    while ((match = this.buffer.match(/^([\s\S]*?)(\d{3}) ([^\r\n]*)\r?\n/))) {
+    while ((match = this.buffer.match(/^([\s\S]*?)^(\d{3}) ([^\r\n]*)\r?\n/m))) {
       const [full, body, status, tail] = match;
       this.buffer = this.buffer.slice(full.length);
 
@@ -329,6 +348,11 @@ class Control extends EventEmitter {
       const pending = this.waiting.shift();
       if (!pending) continue;
 
+      // An abandoned slot still has to be shifted off by its own late reply.
+      // Removing it at timeout instead would hand this answer to the *next*
+      // caller, which is the same off-by-one the 650 case above avoids.
+      if (pending.abandoned) continue;
+
       if (status.startsWith('2')) pending.resolve(lines);
       else pending.reject(new Error(`tor control said: ${status} ${tail}`));
     }
@@ -338,18 +362,41 @@ class Control extends EventEmitter {
     return new Promise((resolve, reject) => {
       if (!this.socket) return reject(new Error('control port is not connected'));
 
-      const timer = setTimeout(
-        () => reject(new Error(`tor did not answer "${command.split(' ')[0]}"`)),
-        CONTROL_TIMEOUT_MS
-      );
+      const entry = { abandoned: false };
+
+      const timer = setTimeout(() => {
+        entry.abandoned = true;
+        reject(new Error(`tor did not answer "${command.split(' ')[0]}"`));
+      }, CONTROL_TIMEOUT_MS);
+
       const settle = (fn) => (value) => {
         clearTimeout(timer);
         fn(value);
       };
 
-      this.waiting.push({ resolve: settle(resolve), reject: settle(reject) });
+      entry.resolve = settle(resolve);
+      entry.reject = settle(reject);
+
+      this.waiting.push(entry);
       this.socket.write(`${command}\r\n`);
     });
+  }
+
+  /**
+   * Subscribe to an asynchronous event class.
+   *
+   * SETEVENTS replaces the whole subscription list rather than adding to it, so
+   * the full set is resent every time. Unsubscribing one thing must not silently
+   * cancel everything else that asked to be told.
+   */
+  async subscribe(name) {
+    this.events.add(name);
+    await this.send(`SETEVENTS ${[...this.events].join(' ')}`.trim());
+  }
+
+  async unsubscribe(name) {
+    this.events.delete(name);
+    await this.send(`SETEVENTS ${[...this.events].join(' ')}`.trim());
   }
 
   close() {
@@ -394,6 +441,18 @@ class Tor extends EventEmitter {
     this.controlPort = null;
     this.address = null;
     this.ready = false;
+    this.published = false;
+  }
+
+  /** Kill the tor we spawned, if it is still with us. */
+  _killProcess() {
+    if (!this.process) return;
+    try {
+      this.process.kill();
+    } catch {
+      /* already dead */
+    }
+    this.process = null;
   }
 
   log(text) {
@@ -443,8 +502,19 @@ class Tor extends EventEmitter {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    await this._awaitBootstrap();
-    await this._openControl();
+    // Any failure from here on must take the process with it. A tor left alive
+    // after a rejected start() is not merely a leak: it holds the lock on its
+    // DataDirectory, so the *next* launch fails too, and the app never recovers
+    // without someone finding the stray process by hand.
+    try {
+      await this._awaitBootstrap();
+      await this._openControl();
+    } catch (err) {
+      this._killProcess();
+      this.control?.close();
+      this.control = null;
+      throw err;
+    }
 
     // Belt and braces alongside TAKEOWNERSHIP: an orphaned tor keeps an onion
     // address published that nothing answers, which looks to a friend exactly
@@ -453,6 +523,17 @@ class Tor extends EventEmitter {
     process.once('exit', this._onExit);
     process.once('SIGINT', this._onExit);
     process.once('SIGTERM', this._onExit);
+
+    // Tor dying later is not hypothetical — it is killed by an OOM reaper, or a
+    // user tidying up Task Manager. Without this, `ready` stayed true, every
+    // dial went to a dead SOCKS port, and the resulting ECONNREFUSED was
+    // reported to the user as the *friend* being offline.
+    this.process.once('exit', (code) => {
+      if (!this.ready) return;
+      this.ready = false;
+      this.log(`tor: exited unexpectedly (code ${code}) — restart torchat to reconnect`);
+      this.emit('down', code);
+    });
 
     this.ready = true;
     return this;
@@ -463,10 +544,27 @@ class Tor extends EventEmitter {
       let settled = false;
       let output = '';
 
+      const detach = () => {
+        this.process.stdout.off('data', onChunk);
+        this.process.stderr.off('data', onChunk);
+        this.process.off('error', onError);
+        this.process.off('exit', onExit);
+
+        // Still drain both pipes. Tor logs notices for as long as it runs, and
+        // a pipe nobody reads fills at 64KB and blocks the writer — which would
+        // wedge tor itself. Flowing with no listener discards, which is what we
+        // want: `output` stops growing here rather than accumulating every log
+        // line for the lifetime of the app.
+        this.process.stdout.resume();
+        this.process.stderr.resume();
+        output = '';
+      };
+
       const done = (err) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        detach();
         if (err) reject(err);
         else resolve();
       };
@@ -488,15 +586,15 @@ class Tor extends EventEmitter {
         if (/Bootstrapped 100%/.test(output)) done();
       };
 
+      const onError = (err) =>
+        done(Object.assign(new Error(`could not run tor: ${err.message}`), { code: 'ENOTOR' }));
+
+      const onExit = (code) => done(new Error(`tor exited with code ${code} before it was ready`));
+
       this.process.stdout.on('data', onChunk);
       this.process.stderr.on('data', onChunk);
-
-      this.process.once('error', (err) =>
-        done(Object.assign(new Error(`could not run tor: ${err.message}`), { code: 'ENOTOR' }))
-      );
-      this.process.once('exit', (code) =>
-        done(new Error(`tor exited with code ${code} before it was ready`))
-      );
+      this.process.once('error', onError);
+      this.process.once('exit', onExit);
     });
   }
 
@@ -577,7 +675,7 @@ class Tor extends EventEmitter {
    */
   async _awaitDescriptor(serviceId, timeoutMs = 120000) {
     try {
-      await this.control.send('SETEVENTS HS_DESC');
+      await this.control.subscribe('HS_DESC');
     } catch {
       return false;
     }
@@ -604,7 +702,7 @@ class Tor extends EventEmitter {
     });
 
     try {
-      await this.control.send('SETEVENTS');
+      await this.control.unsubscribe('HS_DESC');
     } catch {
       /* nothing further depends on unsubscribing */
     }
@@ -635,14 +733,7 @@ class Tor extends EventEmitter {
     this.control?.close();
     this.control = null;
 
-    if (this.process) {
-      try {
-        this.process.kill();
-      } catch {
-        /* already dead */
-      }
-      this.process = null;
-    }
+    this._killProcess();
   }
 }
 

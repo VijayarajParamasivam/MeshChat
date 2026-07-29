@@ -52,8 +52,15 @@ function startEngine() {
       starting = null;
       return active;
     })
-    .catch((err) => {
+    .catch(async (err) => {
       starting = null;
+      // Whatever it got as far as bringing up — the loopback listener, tor
+      // itself — has to come down with it, or a retry meets its own leftovers.
+      try {
+        await engine.stop();
+      } catch {
+        /* it failed to start; it may have nothing to stop */
+      }
       send('torchat:log', `engine failed to start: ${err.message}`);
       throw err;
     });
@@ -140,7 +147,18 @@ const handlers = {
   async createIdentity({ name, sigil }) {
     if (identity.get()) throw new Error('an identity already exists here');
     identity.create(name, sigil);
-    await startEngine();
+
+    // The identity is on disk from here whether or not Tor comes up, so a
+    // failure to start must not be reported as a failure to create. Throwing
+    // left the UI asking for a handle again and the second attempt hitting
+    // "an identity already exists here" — an app bricked until restart by
+    // nothing worse than Tor being slow.
+    try {
+      await startEngine();
+    } catch (err) {
+      return { profile: identity.profile(), tor: null, error: err.message };
+    }
+
     return { profile: identity.profile(), tor: active.status() };
   },
 
@@ -175,6 +193,11 @@ const handlers = {
     return friend ? { id: friend.id, name: friend.name } : null;
   },
 
+  /** Force a connection attempt and report why it failed. Backs /try. */
+  probe(query) {
+    return requireEngine().probe(query);
+  },
+
   history({ peerId, limit }) {
     return requireEngine().history(peerId, limit);
   },
@@ -198,9 +221,15 @@ const handlers = {
   },
 
   async importIdentity(file) {
-    identity.importBackup(fs.readFileSync(file, 'utf8'));
+    // Stop first. Restoring underneath a running engine would have it keep
+    // serving the old identity's onion and write the old conversations back out
+    // over the new one's.
     if (active) await active.stop();
     active = null;
+
+    identity.importBackup(fs.readFileSync(file, 'utf8'));
+    store.resetCache();
+
     await startEngine();
     return identity.profile();
   },

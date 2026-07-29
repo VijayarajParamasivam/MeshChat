@@ -66,13 +66,21 @@ function binaryPath() {
   return path.join(VENDOR, 'tor', process.platform === 'win32' ? 'tor.exe' : 'tor');
 }
 
+/** Records which version the vendored binary actually is. */
+function stampPath() {
+  return path.join(VENDOR, 'version.txt');
+}
+
+function installedVersion() {
+  try {
+    return fs.readFileSync(stampPath(), 'utf8').trim();
+  } catch {
+    return null;
+  }
+}
+
 function pick() {
-  // macOS on Apple silicon runs the x86_64 build fine under Rosetta, but the
-  // native one is there, so prefer an exact match and fall back by arch.
-  const exact = `${process.platform}-${process.arch}`;
-  if (BUNDLES[exact]) return BUNDLES[exact];
-  if (process.platform === 'darwin' && process.arch === 'arm64') return BUNDLES['darwin-arm64'];
-  return null;
+  return BUNDLES[`${process.platform}-${process.arch}`] || null;
 }
 
 function download(url, destination, redirects = 5) {
@@ -139,16 +147,27 @@ async function main() {
     return;
   }
 
-  if (fs.existsSync(binaryPath())) {
+  // Checking only that *a* binary exists meant bumping VERSION above never
+  // re-downloaded anything: the old tor stayed, and this said the new version
+  // was present. The stamp records what is actually unpacked.
+  if (fs.existsSync(binaryPath()) && installedVersion() === VERSION) {
     say(`torchat: tor ${VERSION} already present.`);
     return;
   }
 
   const bundle = pick();
   if (!bundle) {
-    say(`torchat: no Tor build for ${process.platform}/${process.arch}.`);
-    say('  install tor yourself and set TORCHAT_TOR to its path.');
+    // The Tor Project publishes expert bundles for Windows, macOS and Linux on
+    // x86 only — there is no linux-aarch64 build to point at, so ARM Linux
+    // (a Pi, an ARM VPS) has to use the system package.
+    say(`torchat: the Tor Project publishes no expert bundle for ${process.platform}/${process.arch}.`);
+    say('  install tor with your package manager (apt install tor), or set');
+    say('  TORCHAT_TOR to the path of a tor binary you already have.');
     return;
+  }
+
+  if (fs.existsSync(binaryPath())) {
+    say(`torchat: replacing tor ${installedVersion() || 'of unknown version'} with ${VERSION}.`);
   }
 
   fs.mkdirSync(VENDOR, { recursive: true });
@@ -178,6 +197,10 @@ async function main() {
       throw new Error('archive unpacked but no tor binary was found inside it');
     }
 
+    // Only stamp once the binary is verified and in place, so an interrupted
+    // run leaves no claim that this version is installed.
+    fs.writeFileSync(stampPath(), `${VERSION}\n`, 'utf8');
+
     say(`torchat: tor ready at vendor/tor. run "npm start" to begin.`);
   } catch (err) {
     // A failed download must not fail the install. The app still runs, and
@@ -192,6 +215,12 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  say(`torchat: tor setup failed (${err.message}) — continuing anyway.`);
-});
+// Only fetch when run as a script. Requiring this file — as the pin checker
+// does — must not start a 15 MB download as a side effect.
+if (require.main === module) {
+  main().catch((err) => {
+    say(`torchat: tor setup failed (${err.message}) — continuing anyway.`);
+  });
+}
+
+module.exports = { VERSION, BUNDLES, binaryPath, installedVersion };

@@ -27,5 +27,8 @@ jobs:
             node --check "$file"
           done
 
+      - name: Verify the pinned Tor checksums still match the release manifest
+        run: node scripts/check-tor-pins.js
+
       - name: Run tests
         run: npm test

@@ -25,6 +25,20 @@ function init(dir) {
   fs.mkdirSync(path.join(root, 'messages'), { recursive: true });
 }
 
+/**
+ * Drop everything held in memory.
+ *
+ * Conversations are cached in a module-level map, which is fine while one
+ * identity owns the process — and wrong the moment a backup is restored over
+ * it. Without this, the previous identity's history stayed in memory and was
+ * written back to disk under the new one.
+ */
+function resetCache() {
+  for (const timer of pendingSaves.values()) clearTimeout(timer);
+  pendingSaves.clear();
+  conversations.clear();
+}
+
 function filePath(...parts) {
   if (!root) throw new Error('store.init() must be called before use');
   return path.join(root, ...parts);
@@ -104,10 +118,19 @@ function appendMessage(peerId, message) {
   return message;
 }
 
-/** Patch a stored message in place, e.g. marking it delivered when an ack lands. */
-function updateMessage(peerId, messageId, patch) {
+/**
+ * Patch a stored message in place, e.g. marking it delivered when an ack lands.
+ *
+ * `mine` scopes the search to one direction. Message IDs are chosen by whoever
+ * composed the message, so the two directions share an ID space that neither
+ * side controls both halves of. A peer picking an ID that collides with one of
+ * ours could otherwise mark our message delivered by sending a message, or have
+ * their message mistaken for a duplicate of ours. Nothing may match across the
+ * boundary.
+ */
+function updateMessage(peerId, messageId, patch, mine = true) {
   const log = loadConversation(peerId);
-  const found = log.find((m) => m.id === messageId);
+  const found = log.find((m) => m.id === messageId && Boolean(m.mine) === mine);
   if (!found) return null;
   Object.assign(found, patch);
   scheduleSave(peerId);
@@ -119,9 +142,22 @@ function recentMessages(peerId, limit = 60) {
   return limit ? log.slice(-limit) : log.slice();
 }
 
-/** Messages we composed but haven't managed to hand to the peer yet. */
+/** Have we already filed this message *from* the peer? Guards against a resend. */
+function hasMessage(peerId, messageId) {
+  return loadConversation(peerId).some((m) => m.id === messageId && !m.mine);
+}
+
+/**
+ * Everything we composed that the peer has not acknowledged.
+ *
+ * Deliberately includes `sent`, not just `queued`. "Sent" only ever meant that
+ * socket.write() accepted the bytes, which says nothing about whether they
+ * survived the circuit — so a message written into a link that died a moment
+ * later was never retried and never reported, it simply vanished. Only an ack
+ * proves delivery, so only `delivered` is excluded here.
+ */
 function undelivered(peerId) {
-  return loadConversation(peerId).filter((m) => m.mine && m.state === 'queued');
+  return loadConversation(peerId).filter((m) => m.mine && m.state !== 'delivered');
 }
 
 /** Force every pending write to disk. Called on quit. */
@@ -153,6 +189,7 @@ function writeSettings(patch) {
 
 module.exports = {
   init,
+  resetCache,
   readSettings,
   writeSettings,
   readIdentity,
@@ -162,6 +199,7 @@ module.exports = {
   loadConversation,
   appendMessage,
   updateMessage,
+  hasMessage,
   recentMessages,
   undelivered,
   flush,

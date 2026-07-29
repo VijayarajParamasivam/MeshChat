@@ -89,6 +89,13 @@ function parse(code) {
     throw new Error('signature check failed — the code was altered');
   }
 
+  // The timestamp decides which of two cards for the same person is current, so
+  // one dated in the future would outrank every real card that person ever makes
+  // again. A day of slack covers an unset clock; anything beyond that is wrong.
+  if (Number(card.ts) > Date.now() + 86400000) {
+    throw new Error('code is dated in the future — check the sender’s clock');
+  }
+
   return {
     id: card.id,
     sign: card.sign,
